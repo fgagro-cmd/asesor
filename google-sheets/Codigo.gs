@@ -20,7 +20,7 @@ const CLAVE = 'CAMBIA-ESTA-CLAVE'; // debe ser idéntica a la que escribes en la
 const PERMITIDAS = ['Clientes', 'Visitas', 'Tratamientos', 'Planes', 'Cobros'];
 const COPIA = '_copia';
 const CARPETA_FOTOS = 'Fotos de visitas';
-const COLOR = '#3f5a2b';
+const COLOR = '#1f5f3b';
 
 function doGet() {
   return salida({ ok: true, mensaje: 'Asesor: receptor activo' });

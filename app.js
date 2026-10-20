@@ -3,7 +3,7 @@
    Une las apps Visitas, Generador de tratamientos y Clientes. Todo se guarda en el móvil (IndexedDB) y funciona
    sin conexión; clientes, fincas y cultivos salen de los maestros de Drive y hay copia de un solo sentido a la hoja «Asesor». */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 
 /* ---------- Utilidades ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -949,7 +949,6 @@ function dibujarTratForm() {
     <label class="fld"><span>Plazo de seguridad</span><input type="text" id="tfPlazo" autocomplete="off" placeholder="Ej. 15 días" value="${esc(ft.plazo)}"></label>
     <h3>Productos · dosis /1000 L de caldo</h3>
     <div id="tfProds">${ft.prods.map((p, i) => filaProd(p, i)).join('')}</div>
-    <datalist id="dlProd">${state.productos.slice().sort((a, b) => a.nombre.localeCompare(b.nombre, 'es')).map((p) => `<option value="${esc(p.nombre)}">`).join('')}</datalist>
     <div class="actions" style="margin-bottom:14px"><button class="btn" id="tfAddP">+ Añadir producto</button></div>
     <label class="fld"><span>Condiciones de aplicación</span><textarea class="inp" id="tfCond" placeholder="Ej. Aplicar con temperaturas suaves, evitar horas centrales y viento de más de 15 km/h">${esc(ft.cond)}</textarea></label>
     <label class="fld"><span>Observaciones</span><textarea class="inp" id="tfObs" placeholder="Notas para el cliente">${esc(ft.obs)}</textarea></label>
@@ -960,8 +959,14 @@ function dibujarTratForm() {
     <div id="tfPrev" style="margin-top:14px"></div>`;
   wireTratForm(body);
 }
+/* Desplegable con los productos del catálogo; «+ Producto nuevo…» deja escribir uno que no esté */
 function filaProd(p, i) {
-  return `<div class="prod" data-i="${i}"><div class="l1"><span class="num">${i + 1}</span><input type="text" data-pn="${i}" list="dlProd" autocomplete="off" placeholder="Nombre comercial" value="${esc(p.nombre)}"><button class="quitar" data-pq="${i}" aria-label="Quitar">×</button></div>
+  const cat = state.productos.slice().sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+  const enCat = cat.some((x) => N(x.nombre) === N(p.nombre));
+  const nuevo = p.nuevo || (p.nombre && !enCat);
+  const sel = nuevo ? '__nuevo' : (cat.find((x) => N(x.nombre) === N(p.nombre)) || {}).nombre || '';
+  return `<div class="prod" data-i="${i}"><div class="l1"><span class="num">${i + 1}</span><select data-ps="${i}"><option value="">Elige producto…</option>${cat.map((x) => opt(x.nombre, x.nombre, x.nombre === sel)).join('')}${opt('__nuevo', '+ Producto nuevo…', sel === '__nuevo')}</select><button class="quitar" data-pq="${i}" aria-label="Quitar">×</button></div>
+    ${nuevo ? `<input type="text" data-pn="${i}" autocomplete="off" placeholder="Nombre comercial del producto nuevo" value="${esc(p.nombre)}">` : ''}
     <div class="l2"><select data-pt="${i}">${AL.FORM_TYPES.map((t) => opt(t.v, t.label, t.v === p.tipo)).join('')}</select>
     <input type="text" inputmode="decimal" data-pd="${i}" placeholder="Dosis" value="${esc(p.dv)}"><select data-pu="${i}">${AL.UNIDADES.map((u) => opt(u, u, u === AL.unidad(p.du))).join('')}</select></div></div>`;
 }
@@ -970,7 +975,11 @@ function leerTratForm(body) {
   ft.cond = $('#tfCond', body).value; ft.obs = $('#tfObs', body).value;
   const cn = $('#tfCliN', body); if (cn) ft.cliNuevo = cn.value;
   const fn = $('#tfFinT', body); if (fn) ft.finTxt = fn.value;
-  ft.prods = ft.prods.map((p, i) => ({ nombre: $(`[data-pn="${i}"]`, body).value.trim(), tipo: $(`[data-pt="${i}"]`, body).value, dv: $(`[data-pd="${i}"]`, body).value.trim(), du: $(`[data-pu="${i}"]`, body).value }));
+  ft.prods = ft.prods.map((p, i) => {
+    const s = $(`[data-ps="${i}"]`, body).value, inp = $(`[data-pn="${i}"]`, body);
+    const nuevo = s === '__nuevo';
+    return { nombre: nuevo ? (inp ? inp.value.trim() : '') : s, nuevo, tipo: $(`[data-pt="${i}"]`, body).value, dv: $(`[data-pd="${i}"]`, body).value.trim(), du: $(`[data-pu="${i}"]`, body).value };
+  });
 }
 function wireTratForm(body) {
   const pl = $('#tfPl', body);
@@ -988,6 +997,15 @@ function wireTratForm(body) {
     if (f && f.cultivos.length === 1 && !ft.cultivo) ft.cultivo = f.cultivos[0];
     redrawSheet();
   };
+  $$('[data-ps]', body).forEach((s) => {
+    s.onchange = () => {
+      const i = +s.dataset.ps;
+      if (s.value === '__nuevo') { leerTratForm(body); ft.prods[i].nombre = ''; redrawSheet(); setTimeout(() => { const n = $(`[data-pn="${i}"]`); if (n) n.focus(); }, 30); return; }
+      const m = state.productos.find((p) => p.nombre === s.value);
+      if (m && m.tipo) $(`[data-pt="${i}"]`, body).value = m.tipo;
+      if ($(`[data-pn="${i}"]`, body)) { leerTratForm(body); redrawSheet(); }
+    };
+  });
   $$('[data-pn]', body).forEach((inp) => {
     inp.onchange = () => {
       const m = state.productos.find((p) => N(p.nombre) === N(inp.value));
@@ -995,12 +1013,12 @@ function wireTratForm(body) {
     };
   });
   $$('[data-pq]', body).forEach((b) => { b.onclick = () => { leerTratForm(body); ft.prods.splice(+b.dataset.pq, 1); if (!ft.prods.length) ft.prods = [prodVacio()]; redrawSheet(); }; });
-  $('#tfAddP', body).onclick = () => { leerTratForm(body); ft.prods.push(prodVacio()); redrawSheet(); setTimeout(() => { const n = $(`[data-pn="${ft.prods.length - 1}"]`); if (n) n.focus(); }, 30); };
+  $('#tfAddP', body).onclick = () => { leerTratForm(body); ft.prods.push(prodVacio()); redrawSheet(); setTimeout(() => { const n = $(`[data-ps="${ft.prods.length - 1}"]`); if (n) n.focus(); }, 30); };
   $('#tfV', body).onclick = () => { leerTratForm(body); const t = tratDesdeForm(state); $('#tfPrev', body).innerHTML = cardHTML(t); $('#tfPrev', body).scrollIntoView({ behavior: 'smooth', block: 'start' }); };
   $('#tfPlG', body).onclick = () => {
     leerTratForm(body);
     const nombre = $('#tfPlN', body).value.trim(); if (!nombre) return toast('Escribe un nombre para la plantilla', true);
-    const e = { nombre, cultivo: ft.cultivo.trim(), problema: ft.problema.trim(), plazo: ft.plazo.trim(), cond: ft.cond.trim(), obs: ft.obs.trim(), prods: ft.prods.filter((p) => p.nombre) };
+    const e = { nombre, cultivo: ft.cultivo.trim(), problema: ft.problema.trim(), plazo: ft.plazo.trim(), cond: ft.cond.trim(), obs: ft.obs.trim(), prods: ft.prods.filter((p) => p.nombre).map((p) => ({ nombre: p.nombre, tipo: p.tipo, dv: p.dv, du: AL.unidad(p.du) })) };
     commit((s) => { const i = s.plantillas.findIndex((p) => N(p.nombre) === N(nombre)); if (i > -1) s.plantillas[i] = e; else s.plantillas.push(e); }, { render: false });
     renderAll(); toast('Plantilla guardada');
   };
