@@ -3,7 +3,7 @@
    Une las apps Visitas, Generador de tratamientos y Clientes. Todo se guarda en el móvil (IndexedDB) y funciona
    sin conexión; clientes, fincas y cultivos salen de los maestros de Drive y hay copia de un solo sentido a la hoja «Asesor». */
 
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.1.0';
 
 /* ---------- Utilidades ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -219,6 +219,71 @@ function mxStatusText() {
   if (mx.lastError) return 'Maestros: ' + mx.lastError + pend;
   if (!mx.data) return 'Maestros: todavía sin leer' + pend;
   return 'Maestros: ' + mx.data.clientes.length + ' clientes y ' + mx.data.fincas.length + ' fincas · leídos ' + haceTxt(mx.lastFetch) + pend;
+}
+
+/* ---------- Planes de abonado: marca «Enviado» con los informes generados ----------
+   Lee del script de la hoja «Planes de abonado» qué informes mensuales se han generado (acción «enviados»).
+   Si un cliente (enlazado al maestro) tiene generados tantos planes como tiene contratados ese mes, pasa a «Enviado».
+   Nunca quita una marca puesta a mano. */
+let pa = { url: '', clave: '', lastFetch: null, lastError: '', ultimos: 0 };
+let paRunning = false;
+const paOn = () => !!(pa.url && pa.clave);
+function savePa() { dbSet('planesAbonado', pa).catch(() => {}); }
+function aplicarEnviados(s, lista) {
+  const cuenta = {}; // año|mes|mid -> planes distintos generados
+  for (const e of lista) { if (!e.mxCli) continue; const k = `${e.anio}|${e.mes}|${e.mxCli}`; (cuenta[k] = cuenta[k] || new Set()).add(e.plan); }
+  let n = 0;
+  for (const [y, tabla] of Object.entries(s.años || {})) {
+    for (const [cid, r] of Object.entries(tabla)) {
+      const c = s.clientes.find((x) => x.id === cid);
+      if (!c || !c.mid || !(r.planes > 0)) continue;
+      for (let m = 0; m < 12; m++) {
+        const hechos = cuenta[`${y}|${m}|${c.mid}`];
+        if (hechos && hechos.size >= r.planes && (r.env[m] || 'N') === 'N') { r.env[m] = 'E'; n++; }
+      }
+    }
+  }
+  return n;
+}
+async function refreshPlanes({ auto = false, manual = false } = {}) {
+  if (!paOn() || paRunning) return;
+  if (!navigator.onLine) { if (manual) toast('Sin conexión', true); return; }
+  if (auto && pa.lastFetch && Date.now() - new Date(pa.lastFetch).getTime() < 30 * 60000) return;
+  paRunning = true;
+  try {
+    const r = await postScript(pa.url, pa.clave, 'enviados');
+    if (!r.ok) throw new Error(r.error === 'clave' ? 'La clave de Planes de abonado no coincide' : r.error === 'acción desconocida' ? 'Falta actualizar el script de la hoja «Planes de abonado» (nueva implementación)' : (r.error || 'No se pudo leer Planes de abonado'));
+    let n = 0;
+    commit((c) => { n = aplicarEnviados(c, r.enviados || []); }, { render: false });
+    pa = { ...pa, lastFetch: new Date().toISOString(), lastError: '', ultimos: n }; savePa();
+    if (n) renderAll();
+    if (manual) toast(n ? plural(n, 'mes marcado', 'meses marcados') + ' como enviado' : 'Nada nuevo que marcar');
+  } catch (e) { pa = { ...pa, lastError: e.message || String(e) }; savePa(); if (manual) toast(pa.lastError, true); }
+  finally { paRunning = false; redrawSheet(); }
+}
+function drawPa(box) {
+  if (paOn()) {
+    box.innerHTML = `<p class="small">${pa.lastError ? esc(pa.lastError) : pa.lastFetch ? 'Comprobado ' + esc(haceTxt(pa.lastFetch)) + (pa.ultimos ? ' · ' + plural(pa.ultimos, 'mes marcado', 'meses marcados') : '') : 'Aún sin comprobar'}. Cuando un cliente tiene generados todos sus planes del mes, se marca «Enviado» solo (cada 30 minutos al abrir la app).</p>
+      <div class="actions two"><button class="btn primary" id="paNow">Comprobar ahora</button><button class="btn" id="paOff">Desconectar</button></div>`;
+    $('#paNow', box).onclick = () => refreshPlanes({ manual: true });
+    $('#paOff', box).onclick = () => { if (!confirm('¿Desconectar Planes de abonado? Las marcas ya puestas se quedan.')) return; pa = { ...pa, url: '', clave: '', lastError: '' }; savePa(); drawPa(box); };
+  } else {
+    box.innerHTML = `<p class="small">Con la dirección y la clave del script de la hoja «Planes de abonado» (Drive › Apps › Planes de abonado), los meses con todos los informes generados se marcan solos como «Enviado». Los clientes tienen que estar enlazados con el maestro, aquí y en Planes de abonado.</p>
+      <label class="fld"><span>Dirección del script (termina en /exec)</span><input id="paU" type="url" value="${esc(pa.url)}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></label>
+      <label class="fld"><span>Clave</span><input id="paK" type="password" value="${esc(pa.clave)}" autocomplete="off"></label>
+      <div class="actions"><button class="btn primary" id="paOn">Probar y conectar</button></div>`;
+    $('#paOn', box).onclick = async () => {
+      const url = $('#paU', box).value.trim(), clave = $('#paK', box).value.trim();
+      if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/\s]+\/exec\/?$/.test(url)) return toast('La dirección debe ser la del script y terminar en /exec', true);
+      if (!clave) return toast('Escribe la clave', true);
+      try {
+        const r = await postScript(url, clave, 'ping');
+        if (!r.ok) throw new Error(r.error === 'clave' ? 'La clave no coincide con la del script' : (r.error || 'El script no responde'));
+        pa = { ...pa, url, clave, lastError: '', lastFetch: null }; savePa(); toast('Planes de abonado conectado');
+        await refreshPlanes({ manual: true });
+      } catch (e) { toast(e.message || 'No se pudo conectar', true); }
+    };
+  }
 }
 
 /* ---------- Copia a la hoja «Asesor» (un solo sentido) y fotos ---------- */
@@ -1255,6 +1320,7 @@ function abrirAjustes() {
     body.innerHTML = `
       <h3 style="margin-top:4px">Maestros (clientes, fincas y productos)</h3><div id="mxBox"></div>
       <h3>Copia a la hoja «Asesor» y fotos</h3><div id="syBox"></div>
+      <h3>Planes de abonado (marcar enviados)</h3><div id="paBox"></div>
       <h3>Traer datos de las apps antiguas</h3>
       <p class="small">En cada app antigua pulsa «Descargar copia» o «Exportar copia (.json)» y elige aquí los archivos (puedes elegir los tres a la vez). No se borra nada: lo que ya esté no se duplica.</p>
       <div class="box"><div><span>Visitas</span><b>${imp.visitas ? 'traída ' + fF(imp.visitas.slice(0, 10)) : '—'}</b></div><div><span>Generador de tratamientos</span><b>${imp.generador ? 'traída ' + fF(imp.generador.slice(0, 10)) : '—'}</b></div><div><span>Clientes</span><b>${imp.clientes ? 'traída ' + fF(imp.clientes.slice(0, 10)) : '—'}</b></div></div>
@@ -1277,7 +1343,7 @@ function abrirAjustes() {
       <p class="small">Guarda en un archivo todos los datos de Asesor (sin las fotos por subir). ${state.ajustes.ultimaCopia ? 'Última: ' + fF(state.ajustes.ultimaCopia.slice(0, 10)) + '.' : 'Aún no has hecho ninguna.'}</p>
       <div class="actions two"><button class="btn" id="ajExp">Descargar copia</button><label class="btn" style="display:grid;place-items:center">Restaurar copia<input type="file" id="ajRes" accept=".json,application/json" hidden></label></div>
       <p class="small" style="text-align:center;margin-top:18px">Asesor ${APP_VERSION} · FG Agro</p>`;
-    drawMx($('#mxBox', body)); drawSync($('#syBox', body));
+    drawMx($('#mxBox', body)); drawSync($('#syBox', body)); drawPa($('#paBox', body));
     $('#ajImp', body).onchange = (e) => importarArchivos(Array.from(e.target.files || []), $('#ajImpRes', body));
     $('#ajSin', body).onclick = () => reopen(abrirSinEnlazar);
     $('#ajMarca', body).onchange = (e) => commit((s) => { s.ajustes.marca = e.target.value.trim(); });
@@ -1471,7 +1537,8 @@ function abrirSinEnlazar() {
 /* ---------- Arranque ---------- */
 async function init() {
   try {
-    const [s, m, y] = await Promise.all([dbGet('state'), dbGet('mx'), dbGet('sync')]);
+    const [s, m, y, pl] = await Promise.all([dbGet('state'), dbGet('mx'), dbGet('sync'), dbGet('planesAbonado')]);
+    if (pl) pa = { ...pa, ...pl };
     state = AL.migrar(s);
     if (m) mx = { ...mx, ...m };
     if (y) sync = { ...sync, ...y };
@@ -1491,7 +1558,7 @@ async function init() {
   };
   renderAll();
   await contarFotos();
-  const alVolver = () => { refreshMx({ auto: true }); if (syncOn() && (sync.dirty || fotosPend)) runSync(); };
+  const alVolver = () => { refreshMx({ auto: true }); refreshPlanes({ auto: true }); if (syncOn() && (sync.dirty || fotosPend)) runSync(); };
   window.addEventListener('online', alVolver);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { renderAll(); alVolver(); } });
   alVolver();
