@@ -3,7 +3,7 @@
   "short_name": "Asesor",
   "description": "Visitas de campo, recomendaciones de tratamiento y planes y cobros de los clientes de asesoría",
   "lang": "es",
-  "id": "./",
+  "id": "/asesor/",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
