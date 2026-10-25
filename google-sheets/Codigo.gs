@@ -13,6 +13,10 @@
  *
  * IMPORTANTE: la hoja es un espejo. La app reescribe estas pestañas en cada envío,
  * así que no escribas dentro de ellas. Para tus cálculos usa otra pestaña u otro archivo.
+ *
+ * Desde Asesor 1.2.0 la copia (_copia) es la copia común de todos tus aparatos (móvil, tablet y ordenador):
+ * cada aparato la baja («bajar»), la junta con lo suyo y la sube («subir») solo si nadie la ha cambiado
+ * entretanto (número de revisión). Si alguien la cambió, le devuelve la nueva para que vuelva a juntar.
  */
 
 const CLAVE = 'CAMBIA-ESTA-CLAVE'; // debe ser idéntica a la que escribes en la app (⚙ Ajustes → Copia a la hoja «Asesor»)
@@ -34,10 +38,11 @@ function doPost(e) {
     if (req.accion === 'ping') return salida({ ok: true });
     if (req.accion === 'estado') return salida(leerEstado());
     if (req.accion === 'foto') return salida(guardarFoto(req));
-    if (req.accion === 'sincronizar') {
+    if (req.accion === 'bajar' || req.accion === 'subir' || req.accion === 'sincronizar') {
+      // De uno en uno: nadie lee la copia mientras otro la está escribiendo
       const lock = LockService.getScriptLock();
       lock.waitLock(25000);
-      try { return salida(sincronizar(req)); } finally { lock.releaseLock(); }
+      try { return salida(req.accion === 'bajar' ? bajar() : req.accion === 'subir' ? subir(req) : sincronizar(req)); } finally { lock.releaseLock(); }
     }
     return salida({ ok: false, error: 'accion desconocida' });
   } catch (err) {
@@ -87,20 +92,53 @@ function escribirTabla(t) {
   return filas.length;
 }
 
+/* Versiones antiguas de la app (1.1 y anteriores): suben todo y pisan la copia. Si la copia ya es común
+   (la ha subido la 1.2.0 o posterior), se rechaza para no pisar lo de los otros aparatos. */
 function sincronizar(req) {
-  const tablas = (req.tablas || []).filter(function (t) { return t && PERMITIDAS.indexOf(t.nombre) > -1 && Array.isArray(t.cabecera); });
-  const res = {};
-  tablas.forEach(function (t) { res[t.nombre] = escribirTabla(t); });
-  guardarCopia(String(req.estado || ''), new Date().toISOString());
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  PERMITIDAS.forEach(function (n, i) { const sh = ss.getSheetByName(n); if (sh) { ss.setActiveSheet(sh); ss.moveActiveSheet(i + 1); } });
-  return { ok: true, filas: res, fecha: new Date().toISOString() };
+  if (revision() > 0) return { ok: false, error: 'Actualiza Asesor a la versión 1.2.0: cierra la app y vuelve a abrirla con conexión' };
+  escribirTablas(req.tablas);
+  guardarCopia(String(req.estado || ''), new Date().toISOString(), 0);
+  return { ok: true, fecha: new Date().toISOString() };
 }
 
-function guardarCopia(estado, fecha) {
+/* Copia común + número de revisión */
+function bajar() {
+  const e = leerEstado();
+  if (!e.ok) return { ok: true, estado: '', rev: 0, fecha: '' };
+  return { ok: true, estado: e.estado, rev: revision(), fecha: e.fecha };
+}
+
+function subir(req) {
+  const rev = revision();
+  if (Number(req.base) !== rev) {
+    // Otro aparato ha subido entretanto: se le devuelve la copia nueva para que vuelva a juntar
+    const e = leerEstado();
+    return { ok: false, conflicto: true, estado: e.ok ? e.estado : '', rev: rev };
+  }
+  if (!req.estado) return { ok: false, error: 'copia vacía' };
+  escribirTablas(req.tablas);
+  const fecha = new Date().toISOString();
+  guardarCopia(String(req.estado), fecha, rev + 1);
+  return { ok: true, rev: rev + 1, fecha: fecha };
+}
+
+function escribirTablas(lista) {
+  const tablas = (lista || []).filter(function (t) { return t && PERMITIDAS.indexOf(t.nombre) > -1 && Array.isArray(t.cabecera); });
+  tablas.forEach(function (t) { escribirTabla(t); });
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  PERMITIDAS.forEach(function (n, i) { const sh = ss.getSheetByName(n); if (sh) { ss.setActiveSheet(sh); ss.moveActiveSheet(i + 1); } });
+}
+
+function revision() {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(COPIA);
+  if (!sh) return 0;
+  return Number(sh.getRange(1, 3).getValue()) || 0;
+}
+
+function guardarCopia(estado, fecha, rev) {
   const sh = hoja(COPIA);
   sh.clear();
-  sh.getRange(1, 1, 1, 2).setValues([['Copia automática de Asesor (no editar ni borrar)', fecha]]);
+  sh.getRange(1, 1, 1, 3).setValues([['Copia automática de Asesor (no editar ni borrar)', fecha, rev || 0]]);
   const trozos = [];
   for (let i = 0; i < estado.length; i += 40000) trozos.push([estado.substr(i, 40000)]);
   if (trozos.length) {

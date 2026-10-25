@@ -262,15 +262,18 @@
       if (m && c.nombre !== m.nombre) { c.nombre = m.nombre; r.renombrados++; }
     }
     // Dos fichas locales con el mismo cliente del maestro: se unen en una
+    // (en orden de identificador, para que todos los aparatos unan igual)
     const porMid = new Map();
-    for (const c of [...st.clientes]) {
+    for (const c of [...st.clientes].sort((a, b) => String(a.id).localeCompare(String(b.id)))) {
       if (!c.mid) continue;
       if (porMid.has(c.mid) && !choqueAnios(st, c.id, porMid.get(c.mid)).length) { unirCliente(st, c.id, porMid.get(c.mid)); r.unidos++; } else if (!porMid.has(c.mid)) porMid.set(c.mid, c.id);
     }
     // Clientes del maestro con servicio de asesoría que aún no están: entran en Asesor
     for (const m of ix.cli.values()) {
       if (porMid.has(m.id) || !esAsesoria(m) || MX.deBaja(m)) continue;
-      st.clientes.push({ id: nuevoId('c'), mid: m.id, nombre: m.nombre, ases: true, alta: null, baja: null });
+      // Identificador fijo a partir del maestro: si dos aparatos lo añaden a la vez, es el mismo registro
+      const idFijo = 'cm-' + m.id;
+      st.clientes.push({ id: cliente(st, idFijo) ? nuevoId('c') : idFijo, mid: m.id, nombre: m.nombre, ases: true, alta: null, baja: null });
       porMid.set(m.id, true); r.nuevos++;
     }
     // Fincas nuevas que ya están en el maestro (dadas de alta allí a mano o por la cola)
@@ -456,6 +459,135 @@
     return null;
   }
 
+  /* ---------- Varios aparatos (móvil, tablet, ordenador): sellos por registro y fusión ----------
+     El estado se ve como un conjunto de registros con clave (un cliente, una visita, un mes de planes y cobros
+     de un cliente…). Cada registro lleva la hora de su último cambio (st.sello) y los borrados dejan su hora
+     (st.borrados). Al juntar dos copias, en cada registro gana el cambio más reciente; si empatan, la de la hoja. */
+  const COLS = { clientes: ['cli', 'id'], fincasNuevas: ['fn', 'id'], visitas: ['vis', 'id'], trat: ['tr', 'id'], productos: ['pr', 'id'], mxPend: ['mp', 'k'] };
+  const LISTAS = { plagas: ['pg', (x) => x && x.nombre], fenologias: ['fe', (x) => x && x.nombre], plantillas: ['pl', (x) => x && x.nombre], cultivos: ['cu', (x) => x] };
+  const CONOCIDAS = new Set(['v', 'sello', 'borrados', 'cultivosExtra', 'años', 'ajustes', 'importes', ...Object.keys(COLS), ...Object.keys(LISTAS)]);
+  const J = (v) => JSON.stringify(v === undefined ? null : v);
+  /* Estado → Map clave → valor en JSON (en orden estable) */
+  function aplanar(st) {
+    const m = new Map();
+    if (!st || typeof st !== 'object') return m;
+    for (const [col, [pre, campo]] of Object.entries(COLS)) for (const x of st[col] || []) if (x && x[campo] != null) m.set(pre + '|' + x[campo], J(x));
+    for (const [lista, [pre, nom]] of Object.entries(LISTAS)) {
+      const orden = [];
+      for (const x of st[lista] || []) { const k = norm(nom(x)); if (!k) continue; const key = pre + '|' + k; if (m.has(key)) continue; m.set(key, J(x)); orden.push(key); }
+      m.set('ord|' + lista, J(orden));
+    }
+    for (const [fid, cs] of Object.entries(st.cultivosExtra || {})) m.set('ce|' + fid, J(cs));
+    for (const [y, t] of Object.entries(st.años || {})) {
+      m.set('ay|' + y, '1');
+      for (const [cid, r] of Object.entries(t || {})) {
+        if (!r) continue;
+        m.set('af|' + y + '|' + cid, J({ planes: r.planes, precio: r.precio }));
+        for (let i = 0; i < 12; i++) m.set('am|' + y + '|' + cid + '|' + i, J({ e: (r.env || [])[i], i: (r.imp || [])[i], c: (r.cob || [])[i], h: (r.man || [])[i] }));
+      }
+    }
+    const aj = st.ajustes || {};
+    for (const [k, v] of Object.entries(aj)) {
+      if (k === 'dias') { for (const [mes, n] of Object.entries(v || {})) m.set('ad|' + mes, J(n)); } else m.set('aj|' + k, J(v));
+    }
+    for (const [k, v] of Object.entries(st.importes || {})) m.set('im|' + k, J(v));
+    for (const k of Object.keys(st)) if (!CONOCIDAS.has(k)) m.set('x|' + k, J(st[k]));
+    return m;
+  }
+  /* Map clave → JSON → estado */
+  function reconstruir(m) {
+    const st = { v: 1, clientes: [], fincasNuevas: [], cultivosExtra: {}, visitas: [], trat: [], plantillas: [], productos: [], plagas: [], fenologias: [], cultivos: [], años: {}, ajustes: { dias: {} }, mxPend: [], importes: {} };
+    const porPre = {}; for (const [col, [pre]] of Object.entries(COLS)) porPre[pre] = col;
+    const listas = {}; for (const [lista, [pre]] of Object.entries(LISTAS)) listas[pre] = { lista, items: new Map(), orden: [] };
+    const filas = {};
+    for (const [key, js] of m) {
+      const i = key.indexOf('|'), pre = key.slice(0, i), resto = key.slice(i + 1), v = JSON.parse(js);
+      if (porPre[pre]) st[porPre[pre]].push(v);
+      else if (listas[pre]) listas[pre].items.set(key, v);
+      else if (pre === 'ord') { const L = Object.values(listas).find((x) => x.lista === resto); if (L) L.orden = Array.isArray(v) ? v : []; }
+      else if (pre === 'ce') st.cultivosExtra[resto] = v;
+      else if (pre === 'ay') { if (!st.años[resto]) st.años[resto] = {}; }
+      else if (pre === 'af' || pre === 'am') {
+        const p = resto.split('|'), y = p[0], cid = p[1];
+        if (!st.años[y]) st.años[y] = {};
+        const fk = y + '|' + cid;
+        if (!filas[fk]) filas[fk] = { y, cid, base: null, meses: {} };
+        if (pre === 'af') filas[fk].base = v; else filas[fk].meses[p[2]] = v;
+      }
+      else if (pre === 'ad') st.ajustes.dias[resto] = v;
+      else if (pre === 'aj') st.ajustes[resto] = v;
+      else if (pre === 'im') st.importes[resto] = v;
+      else if (pre === 'x') st[resto] = v;
+    }
+    for (const L of Object.values(listas)) {
+      const vistos = new Set();
+      for (const k of L.orden) if (L.items.has(k) && !vistos.has(k)) { st[L.lista].push(L.items.get(k)); vistos.add(k); }
+      for (const [k, v] of L.items) if (!vistos.has(k)) st[L.lista].push(v);
+    }
+    for (const f of Object.values(filas)) {
+      // Una fila sin su cabecera (planes y precio) solo puede venir de un borrado a medias: no se rehace
+      if (!f.base) continue;
+      const r = { planes: Number(f.base.planes) || 0, precio: Number(f.base.precio) || 0, env: [], imp: [], cob: [], man: [] };
+      for (let i = 0; i < 12; i++) {
+        const x = f.meses[i] || {};
+        r.env.push(ESTADOS.includes(x.e) ? x.e : 'N'); r.imp.push(x.i == null ? r.precio : x.i); r.cob.push(!!x.c); r.man.push(!!x.h);
+      }
+      st.años[f.y][f.cid] = r;
+    }
+    return st;
+  }
+  /* Primera vez con sellos: todos los registros con la misma hora (0 en un aparato vacío, 1 si ya tiene datos) */
+  function prepararSellos(st, t) {
+    if (st.sello && typeof st.sello === 'object') { if (!st.borrados || typeof st.borrados !== 'object') st.borrados = {}; return false; }
+    st.sello = {}; st.borrados = {};
+    for (const k of aplanar(st).keys()) st.sello[k] = t;
+    return true;
+  }
+  /* Aparato sin datos propios (recién instalado) */
+  const virgen = (st) => !st || !((st.clientes || []).length || (st.visitas || []).length || (st.trat || []).length || (st.productos || []).length || (st.plantillas || []).length || Object.keys(st.años || {}).length);
+  /* Pone la hora t en los registros que han cambiado entre prev y next, y anota los borrados. Devuelve cuántos. */
+  function sellar(prev, next, t) {
+    const a = prev ? aplanar(prev) : new Map(), b = aplanar(next);
+    const sp = (prev && prev.sello) || {}, bp = (prev && prev.borrados) || {};
+    const sello = { ...(next.sello || {}) }, borr = { ...bp, ...(next.borrados || {}) };
+    let n = 0;
+    for (const [k, v] of b) {
+      if (a.get(k) !== v) { sello[k] = t; delete borr[k]; n++; }
+      else if (!(k in sello)) sello[k] = k in sp ? sp[k] : 0;
+    }
+    for (const k of a.keys()) if (!b.has(k)) { borr[k] = t; n++; }
+    for (const k of Object.keys(sello)) if (!b.has(k)) delete sello[k];
+    next.sello = sello; next.borrados = borr;
+    return n;
+  }
+  /* Junta la copia local con la de la hoja. Devuelve el estado juntado y cuántos registros cambian en cada lado. */
+  function fusionar(L, R) {
+    const fl = aplanar(L), fr = aplanar(R);
+    const sl = (L && L.sello) || {}, sr = (R && R.sello) || {}, bl = (L && L.borrados) || {}, br = (R && R.borrados) || {};
+    const hora = (f, s, b, k) => (f.has(k) ? (Number(s[k]) || 0) : (k in b ? Number(b[k]) || 0 : -1));
+    const claves = new Set([...fl.keys(), ...fr.keys(), ...Object.keys(bl), ...Object.keys(br)]);
+    const out = new Map(), sello = {}, borr = {};
+    let nL = 0, nR = 0;
+    for (const k of claves) {
+      const tl = hora(fl, sl, bl, k), tr = hora(fr, sr, br, k);
+      const deR = tr >= tl; // empate: gana la hoja
+      const v = deR ? fr.get(k) : fl.get(k), t = deR ? tr : tl;
+      if (v !== undefined) { out.set(k, v); sello[k] = t; } else if (t >= 0) borr[k] = t;
+      if (v !== fl.get(k)) nL++;
+      if (v !== fr.get(k) || t !== tr) nR++;
+    }
+    const st = reconstruir(out);
+    st.sello = sello; st.borrados = borr;
+    return { st, nL, nR };
+  }
+  /* Huella del estado (datos + sellos): para saber si la hoja ya tiene exactamente lo mismo */
+  function huella(st) {
+    const f = aplanar(st), s = (st && st.sello) || {}, b = (st && st.borrados) || {};
+    const filas = [...f.keys()].sort().map((k) => k + '=' + f.get(k) + '@' + (s[k] || 0));
+    const bor = Object.keys(b).sort().map((k) => k + '@' + b[k]);
+    return filas.join('\n') + '\n#\n' + bor.join('\n');
+  }
+
   /* ---------- tablas para Google Sheets ---------- */
   function tablas(st, ix, hoy) {
     const nomCli = (id) => { const c = cliente(st, id); return c ? c.nombre : ''; };
@@ -516,6 +648,7 @@
     cliente, delAsesor, esAsesoria, fincasDe, finca, ultimaVisita, estadoFinca, activo, fincasEstado, seguimientos, recientes,
     buscarFincaCli, choqueAnios, unirCliente, cambiarFinca, aplicarMaestros, asegurarCliente, asegurarFinca, asegurarProducto,
     importarVisitas, importarGenerador, importarClientes, detectarCopia, tablas,
+    aplanar, reconstruir, prepararSellos, virgen, sellar, fusionar, huella,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.AL = api;
 })(typeof window !== 'undefined' ? window : globalThis);

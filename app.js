@@ -1,9 +1,10 @@
 'use strict';
 /* Asesor · FG Agro — visitas de campo, recomendaciones de tratamiento y planes y cobros de los clientes de asesoría.
-   Une las apps Visitas, Generador de tratamientos y Clientes. Todo se guarda en el móvil (IndexedDB) y funciona
-   sin conexión; clientes, fincas y cultivos salen de los maestros de Drive y hay copia de un solo sentido a la hoja «Asesor». */
+   Une las apps Visitas, Generador de tratamientos y Clientes. Todo se guarda en el aparato (IndexedDB) y funciona
+   sin conexión; clientes, fincas y cultivos salen de los maestros de Drive. Desde la 1.2.0 la hoja «Asesor» es la
+   copia común de todos los aparatos (móvil, tablet y ordenador): cada uno la baja, la junta con lo suyo y la sube. */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 
 /* ---------- Utilidades ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -82,7 +83,11 @@ const fotoTodas = () => dbOp('fotos', 'readonly', (s) => s.getAll());
 /* ---------- Estado ---------- */
 let state = AL.vacio();
 let saveChain = Promise.resolve();
+/* Última versión sellada: al guardar, los registros que han cambiado desde ella llevan la hora del cambio */
+let prevSnap = null;
 function persist() {
+  if (prevSnap) AL.sellar(prevSnap, state, Date.now());
+  prevSnap = structuredClone(state);
   const copia = state;
   saveChain = saveChain.then(() => dbSet('state', copia)).catch((e) => toast('No se pudo guardar en el móvil: ' + (e && e.message || e), true));
   markDirty();
@@ -138,7 +143,7 @@ const opt = (v, t, sel) => `<option value="${esc(v)}"${sel ? ' selected' : ''}>$
 /* ---------- Maestros compartidos ----------
    Se leen del servicio privado (Apps Script de «Maestro de clientes», Drive › Apps › Maestros) y se guardan en el
    móvil. Asesor solo lee y pide altas (clientes, fincas y cultivos nuevos entran con Revisar = Sí). */
-let mx = { url: '', clave: '', data: null, fecha: null, lastFetch: null, lastError: '' };
+let mx = { url: '', clave: '', data: null, fecha: null, lastFetch: null, lastError: '', apagado: false };
 let IX = null, mxRunning = false;
 const mxOn = () => !!(mx.url && mx.clave);
 async function postScript(url, clave, accion, extra = {}, ms = 45000) {
@@ -225,7 +230,7 @@ function mxStatusText() {
    Lee del script de la hoja «Planes de abonado» qué informes mensuales se han generado (acción «enviados»).
    Si un cliente (enlazado al maestro) tiene generados tantos planes como tiene contratados ese mes, pasa a «Enviado».
    Nunca quita una marca puesta a mano. */
-let pa = { url: '', clave: '', lastFetch: null, lastError: '', ultimos: 0 };
+let pa = { url: '', clave: '', lastFetch: null, lastError: '', ultimos: 0, apagado: false };
 let paRunning = false;
 const paOn = () => !!(pa.url && pa.clave);
 function savePa() { dbSet('planesAbonado', pa).catch(() => {}); }
@@ -266,7 +271,7 @@ function drawPa(box) {
     box.innerHTML = `<p class="small">${pa.lastError ? esc(pa.lastError) : pa.lastFetch ? 'Comprobado ' + esc(haceTxt(pa.lastFetch)) + (pa.ultimos ? ' · ' + plural(pa.ultimos, 'mes marcado', 'meses marcados') : '') : 'Aún sin comprobar'}. Cuando un cliente tiene generados todos sus planes del mes, se marca «Enviado» solo (cada 30 minutos al abrir la app).</p>
       <div class="actions two"><button class="btn primary" id="paNow">Comprobar ahora</button><button class="btn" id="paOff">Desconectar</button></div>`;
     $('#paNow', box).onclick = () => refreshPlanes({ manual: true });
-    $('#paOff', box).onclick = () => { if (!confirm('¿Desconectar Planes de abonado? Las marcas ya puestas se quedan.')) return; pa = { ...pa, url: '', clave: '', lastError: '' }; savePa(); drawPa(box); };
+    $('#paOff', box).onclick = () => { if (!confirm('¿Desconectar Planes de abonado en este aparato? Las marcas ya puestas se quedan.')) return; pa = { ...pa, url: '', clave: '', lastError: '', apagado: true }; savePa(); drawPa(box); };
   } else {
     box.innerHTML = `<p class="small">Con la dirección y la clave del script de la hoja «Planes de abonado» (Drive › Apps › Planes de abonado), los meses con todos los informes generados se marcan solos como «Enviado». Los clientes tienen que estar enlazados con el maestro, aquí y en Planes de abonado.</p>
       <label class="fld"><span>Dirección del script (termina en /exec)</span><input id="paU" type="url" value="${esc(pa.url)}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></label>
@@ -279,38 +284,97 @@ function drawPa(box) {
       try {
         const r = await postScript(url, clave, 'ping');
         if (!r.ok) throw new Error(r.error === 'clave' ? 'La clave no coincide con la del script' : (r.error || 'El script no responde'));
-        pa = { ...pa, url, clave, lastError: '', lastFetch: null }; savePa(); toast('Planes de abonado conectado');
+        pa = { ...pa, url, clave, lastError: '', lastFetch: null, apagado: false }; savePa(); guardarConex(); toast('Planes de abonado conectado');
         await refreshPlanes({ manual: true });
       } catch (e) { toast(e.message || 'No se pudo conectar', true); }
     };
   }
 }
 
-/* ---------- Copia a la hoja «Asesor» (un solo sentido) y fotos ---------- */
-let sync = { url: '', clave: '', enabled: false, dirty: false, lastOk: null, lastError: '' };
+/* ---------- Hoja «Asesor»: copia común de todos los aparatos, y fotos ----------
+   1. Baja la copia de la hoja y la junta con lo de este aparato (en cada registro gana el cambio más reciente).
+   2. Sube las fotos pendientes.
+   3. Si este aparato tiene algo que la hoja no, sube la copia juntada (solo si nadie la ha cambiado entretanto;
+      si la cambió otro aparato, vuelve a juntar y lo intenta otra vez). */
+let sync = { url: '', clave: '', enabled: false, dirty: false, lastOk: null, lastPull: null, lastError: '', rev: 0 };
 let syncRunning = false, syncTimer = null, syncRetry = null, syncRev = 0, fotosPend = 0, fotosRunning = false;
+let ultimoRemoto = null; // huella de la última copia vista en la hoja
 const syncOn = () => !!(sync.enabled && sync.url && sync.clave);
 const callSync = (accion, extra, ms) => postScript(sync.url, sync.clave, accion, extra, ms);
 function saveSync() { dbSet('sync', sync).catch(() => {}); }
+function errSync(r, def) {
+  if (r.error === 'clave') return 'La clave no coincide con la del script';
+  if (r.error === 'accion desconocida') return 'Falta actualizar el script de la hoja «Asesor» (nueva implementación, ver README)';
+  return r.error || def || 'Error del receptor';
+}
 function markDirty() {
   if (!syncOn()) return;
   sync.dirty = true; syncRev++; saveSync(); renderStatus();
   clearTimeout(syncTimer); syncTimer = setTimeout(() => runSync(), 2500);
 }
-function syncPayload() {
-  const tablas = AL.tablas(state, IX, hoy());
-  return { tablas, estado: JSON.stringify(state), version: APP_VERSION };
+/* Conexiones compartidas (maestros y Planes de abonado): viajan en la copia para no tener que escribirlas en cada aparato */
+function guardarConex() {
+  const c = state.conex || {};
+  const n = {
+    mx: mxOn() ? { url: mx.url, clave: mx.clave } : (c.mx || null),
+    pa: paOn() ? { url: pa.url, clave: pa.clave } : (c.pa || null),
+  };
+  if (JSON.stringify(n) !== JSON.stringify({ mx: c.mx || null, pa: c.pa || null })) commit((s) => { s.conex = n; }, { render: false });
+}
+function aplicarConex() {
+  const c = state.conex || {};
+  if (!mxOn() && !mx.apagado && c.mx && c.mx.url && c.mx.clave) { mx = { ...mx, url: c.mx.url, clave: c.mx.clave, lastError: '' }; saveMx(); setTimeout(() => refreshMx({}), 100); }
+  if (!paOn() && !pa.apagado && c.pa && c.pa.url && c.pa.clave) { pa = { ...pa, url: c.pa.url, clave: c.pa.clave, lastError: '' }; savePa(); setTimeout(() => refreshPlanes({}), 300); }
+}
+/* Pinta otra vez la vista sin estropear lo que se esté escribiendo en ella (las hojas abiertas no se tocan) */
+let renderPend = false;
+const escribiendo = () => { const a = document.activeElement; return !!(a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName) && $('#view').contains(a)); };
+function renderSoon() { if (escribiendo()) { renderPend = true; return; } renderPend = false; renderAll(); }
+document.addEventListener('focusout', () => { if (renderPend) setTimeout(() => { if (renderPend && !escribiendo()) { renderPend = false; renderAll(); } }, 60); });
+/* Junta la copia de la hoja (texto JSON) con la de este aparato. Devuelve cuántos registros han cambiado aquí. */
+function recibir(texto) {
+  if (!texto) { ultimoRemoto = null; return 0; }
+  let r;
+  try { r = JSON.parse(texto); } catch (_) { throw new Error('La copia de la hoja está dañada'); }
+  if (!AL.valido(r)) throw new Error('La copia de la hoja no es válida');
+  r = AL.migrar(r);
+  let nuevo, n;
+  if (AL.virgen(state) && !AL.virgen(r)) {
+    // Aparato recién instalado: se queda con lo de la hoja tal cual
+    nuevo = structuredClone(r); AL.prepararSellos(nuevo, 0); n = 1;
+  } else { const f = AL.fusionar(state, r); nuevo = AL.migrar(f.st); n = f.nL; }
+  ultimoRemoto = AL.huella(r);
+  if (AL.huella(nuevo) !== AL.huella(state)) {
+    state = nuevo; prevSnap = structuredClone(state);
+    const copia = state;
+    saveChain = saveChain.then(() => dbSet('state', copia)).catch((e) => toast('No se pudo guardar en este aparato: ' + (e && e.message || e), true));
+    IX = mx.data ? MX.indexar(mx.data) : IX;
+    aplicarConex();
+    if (n) renderSoon();
+  }
+  return n;
 }
 async function runSync() {
   if (!syncOn() || syncRunning) return;
   if (!navigator.onLine) { renderStatus(); return; }
-  syncRunning = true; const rev = syncRev; renderStatus();
+  syncRunning = true; renderStatus();
   try {
+    const b = await callSync('bajar', {}, 45000);
+    if (!b.ok) throw new Error(errSync(b, 'No se pudo leer la hoja'));
+    let base = Number(b.rev) || 0;
+    const n = recibir(b.estado);
+    if (n && sync.lastPull) toast(plural(n, 'cambio recibido', 'cambios recibidos') + ' de tus otros aparatos');
+    sync.lastPull = new Date().toISOString();
     await subirFotos();
-    const r = await callSync('sincronizar', syncPayload(), 60000);
-    if (!r.ok) throw new Error(r.error === 'clave' ? 'La clave no coincide con la del script' : (r.error || 'Error del receptor'));
-    sync.lastOk = new Date().toISOString(); sync.lastError = '';
-    if (syncRev === rev) sync.dirty = false;
+    for (let i = 0; i < 4 && AL.huella(state) !== ultimoRemoto; i++) {
+      const env = state;
+      const p = await callSync('subir', { base, tablas: AL.tablas(env, IX, hoy()), estado: JSON.stringify(env), version: APP_VERSION }, 90000);
+      if (p.ok) { base = Number(p.rev) || base + 1; ultimoRemoto = AL.huella(env); sync.lastOk = new Date().toISOString(); continue; }
+      if (p.conflicto) { recibir(p.estado); base = Number(p.rev) || 0; continue; }
+      throw new Error(errSync(p, 'No se pudo enviar a la hoja'));
+    }
+    sync.rev = base; sync.lastError = '';
+    sync.dirty = AL.huella(state) !== ultimoRemoto;
   } catch (e) {
     sync.lastError = e.message || String(e); sync.dirty = true;
     clearTimeout(syncRetry); syncRetry = setTimeout(() => runSync(), 60000);
@@ -340,10 +404,11 @@ async function subirFotos() {
 function syncStatusText() {
   if (!syncOn()) return '';
   const fp = fotosPend ? ' · ' + plural(fotosPend, 'foto por subir', 'fotos por subir') : '';
-  if (syncRunning) return '☁ Enviando a la hoja «Asesor»…' + fp;
-  if (sync.lastError) return '☁ No se pudo enviar: ' + sync.lastError + fp;
-  if (sync.dirty) return (navigator.onLine ? '☁ Pendiente de enviar…' : '☁ Pendiente de enviar (sin conexión)') + fp;
-  return '☁ Hoja al día · ' + haceTxt(sync.lastOk) + fp;
+  if (syncRunning) return '☁ Juntando con la hoja «Asesor»…' + fp;
+  if (sync.lastError) return '☁ Sin juntar: ' + sync.lastError + fp;
+  if (!navigator.onLine) return (sync.dirty ? '☁ Cambios pendientes de enviar (sin conexión)' : '☁ Sin conexión') + fp;
+  if (sync.dirty) return '☁ Pendiente de enviar…' + fp;
+  return '☁ Al día con tus aparatos · ' + haceTxt(sync.lastPull || sync.lastOk) + fp;
 }
 function renderStatus() {
   const a = $('#syncStatus'); if (a) { a.textContent = syncStatusText(); a.hidden = !syncOn(); }
@@ -960,7 +1025,7 @@ async function abrirVisita(id) {
         <div class="chips wrap" style="margin-top:8px">${Object.keys(cv.plagas || {}).map((n) => `<span class="chip sm nivel-${cv.plagas[n]}" style="display:inline-flex;align-items:center">${esc(n)} · ${cv.plagas[n]}</span>`).join('') || '<span class="small">Sin plagas anotadas</span>'}</div></div>`).join('')}
       ${x.obs ? `<h3>Observaciones</h3><p style="white-space:pre-wrap;margin-top:0">${esc(x.obs)}</p>` : ''}
       ${x.accion ? `<h3>Acción pendiente</h3><div class="mini ${x.hecho ? '' : (x.seg && x.seg < hoy() ? 'vencido' : '')}"><div><div class="name">${esc(x.accion)}</div><div class="sub fecha">${x.hecho ? 'Hecho' : (x.seg ? 'Para el ' + fF(x.seg) : 'Sin fecha')}</div></div>${x.hecho ? '<span class="pill ok">Hecho</span>' : `<button class="paid" data-hecho="${esc(x.id)}">Hecho</button>`}</div>` : ''}
-      ${(x.fotos || []).length ? `<h3>Fotos</h3><div class="thumbs">${x.fotos.map((f) => `<div class="thumb">${f.url ? `<a href="${esc(f.url)}" target="_blank" rel="noopener" style="display:grid;place-items:center;height:100%;font-size:12px;text-align:center">Ver en Drive</a>` : (prev[f.k] ? `<img src="${prev[f.k]}" alt=""><span class="pend">por subir</span>` : '<span class="pend">por subir</span>')}</div>`).join('')}</div>` : ''}
+      ${(x.fotos || []).length ? `<h3>Fotos</h3><div class="thumbs">${x.fotos.map((f) => `<div class="thumb">${f.url ? `<a href="${esc(f.url)}" target="_blank" rel="noopener" style="display:grid;place-items:center;height:100%;font-size:12px;text-align:center">Ver en Drive</a>` : (prev[f.k] ? `<img src="${prev[f.k]}" alt=""><span class="pend">por subir</span>` : '<span class="pend">en otro aparato, por subir</span>')}</div>`).join('')}</div>` : ''}
       ${x.fotosAntes ? `<p class="small">Esta visita tenía ${plural(x.fotosAntes, 'foto', 'fotos')} en la app Visitas (están en su carpeta de Drive).</p>` : ''}
       <div class="actions two" style="margin-top:14px"><button class="btn" id="vdE">Editar</button><button class="btn" id="vdF">Ficha del cliente</button></div>
       <div class="actions"><button class="btn" id="vdT">Nuevo tratamiento para esta finca</button><button class="btn danger" id="vdB">Borrar visita</button></div>`;
@@ -1319,7 +1384,7 @@ function abrirAjustes() {
     const imp = state.importes || {};
     body.innerHTML = `
       <h3 style="margin-top:4px">Maestros (clientes, fincas y productos)</h3><div id="mxBox"></div>
-      <h3>Copia a la hoja «Asesor» y fotos</h3><div id="syBox"></div>
+      <h3>Tus aparatos (hoja «Asesor») y fotos</h3><div id="syBox"></div>
       <h3>Planes de abonado (marcar enviados)</h3><div id="paBox"></div>
       <h3>Traer datos de las apps antiguas</h3>
       <p class="small">En cada app antigua pulsa «Descargar copia» o «Exportar copia (.json)» y elige aquí los archivos (puedes elegir los tres a la vez). No se borra nada: lo que ya esté no se duplica.</p>
@@ -1372,7 +1437,7 @@ function abrirAjustes() {
         try {
           const d = AL.detectarCopia(JSON.parse(rd.result));
           if (!d || d.tipo !== 'asesor' || !AL.valido(d.datos)) throw new Error('formato');
-          if (!confirm(`Se sustituyen los datos de este móvil por los del archivo (${d.datos.visitas.length} visitas, ${d.datos.trat.length} tratamientos, ${d.datos.clientes.length} clientes). ¿Continuar?`)) return;
+          if (!confirm(`Se sustituyen los datos de este aparato por los del archivo (${d.datos.visitas.length} visitas, ${d.datos.trat.length} tratamientos, ${d.datos.clientes.length} clientes)${syncOn() ? ' y, al juntar con la hoja, también en tus otros aparatos' : ''}. ¿Continuar?`)) return;
           state = AL.migrar(d.datos); persist(); renderAll(); redrawSheet(); toast('Copia restaurada');
         } catch (_) { toast('Ese archivo no es una copia de Asesor. Las copias de las apps antiguas se traen en «Traer datos de las apps antiguas».', true); }
       };
@@ -1387,7 +1452,7 @@ function drawMx(box) {
     box.innerHTML = `<p class="small" id="mxLine">${esc(mxStatusText())}</p>
       <div class="actions two"><button class="btn primary" id="mxNow">Actualizar ahora</button><button class="btn" id="mxOff">Desconectar</button></div>`;
     $('#mxNow', box).onclick = () => refreshMx({ manual: true });
-    $('#mxOff', box).onclick = () => { if (!confirm('¿Desconectar los maestros? Lo enlazado se conserva, pero dejarás de ver las fincas hasta volver a conectarlos.')) return; mx = { ...mx, url: '', clave: '', lastError: '' }; saveMx(); renderStatus(); drawMx(box); };
+    $('#mxOff', box).onclick = () => { if (!confirm('¿Desconectar los maestros en este aparato? Lo enlazado se conserva, pero dejarás de ver las fincas hasta volver a conectarlos.')) return; mx = { ...mx, url: '', clave: '', lastError: '', apagado: true }; saveMx(); renderStatus(); drawMx(box); };
   } else {
     box.innerHTML = `<p class="small">Clientes, fincas y cultivos salen del maestro de Drive (Apps › Maestros). Es el mismo script y la misma clave que en Ventas, Gestión fincas y AgroServicios.</p>
       <label class="fld"><span>Dirección del script de maestros (termina en /exec)</span><input id="mxU" type="url" value="${esc(mx.url)}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></label>
@@ -1400,7 +1465,7 @@ function drawMx(box) {
       try {
         const r = await postScript(url, clave, 'ping');
         if (!r.ok) throw new Error(mxErr(r, 'El script no responde'));
-        mx = { ...mx, url, clave, lastError: '' }; saveMx(); toast('Maestros conectados');
+        mx = { ...mx, url, clave, lastError: '', apagado: false }; saveMx(); guardarConex(); toast('Maestros conectados');
         await refreshMx({ manual: true });
       } catch (e) { toast(e.message || 'No se pudo conectar', true); }
     };
@@ -1409,25 +1474,31 @@ function drawMx(box) {
 function drawSync(box) {
   if (syncOn()) {
     box.innerHTML = `<p class="small" id="syncLine">${esc(syncStatusText())}</p>
-      <p class="small">Cada cambio se copia solo en tu hoja «Asesor» (pestañas Clientes, Visitas, Tratamientos, Planes y Cobros) y las fotos van a la carpeta «Fotos de visitas» junto a la hoja. Sin conexión queda pendiente y se envía al volver.</p>
-      <div class="actions"><button class="btn primary" id="syNow">Enviar ahora</button><button class="btn" id="syRes">Restaurar desde la hoja</button><button class="btn danger" id="syOff">Desactivar</button></div>`;
-    $('#syNow', box).onclick = () => { if (!navigator.onLine) return toast('Sin conexión: se enviará al volver', true); sync.lastError = ''; markDirty(); clearTimeout(syncTimer); runSync(); };
+      <p class="small">Tus aparatos (móvil, tablet y ordenador) comparten los datos a través de la hoja «Asesor»: cada cambio se envía solo y cada pocos minutos se recogen los de los otros aparatos. Si cambias lo mismo en dos sitios, se queda el cambio más reciente. Sin conexión todo sigue funcionando y se junta al volver. Las fotos van a la carpeta «Fotos de visitas», junto a la hoja.</p>
+      <div class="actions"><button class="btn primary" id="syNow">Juntar ahora</button><button class="btn" id="syRes">Volver a la copia de la hoja…</button><button class="btn danger" id="syOff">Desconectar este aparato</button></div>`;
+    $('#syNow', box).onclick = () => { if (!navigator.onLine) return toast('Sin conexión: se juntará al volver', true); sync.lastError = ''; clearTimeout(syncTimer); runSync(); };
     $('#syRes', box).onclick = async () => {
       try {
-        const est = await callSync('estado');
-        if (!est.ok || !est.estado) throw new Error(est.error === 'sin copia' ? 'La hoja todavía no tiene copia' : (est.error || 'No se pudo leer la copia'));
-        const s = JSON.parse(est.estado);
+        const b = await callSync('bajar');
+        if (!b.ok) throw new Error(errSync(b, 'No se pudo leer la copia'));
+        if (!b.estado) throw new Error('La hoja todavía no tiene copia');
+        const s = JSON.parse(b.estado);
         if (!AL.valido(s)) throw new Error('La copia de la hoja no es válida');
-        if (!confirm(`Se sustituyen los datos de este móvil por los de la hoja (${s.visitas.length} visitas, ${s.trat.length} tratamientos, copia ${haceTxt(est.fecha)}). ¿Continuar?`)) return;
-        state = AL.migrar(s); persist(); renderAll(); redrawSheet(); toast('Restaurado desde la hoja');
-      } catch (e) { toast(e.message || 'No se pudo restaurar', true); }
+        if (!confirm(`Se descartan los datos de este aparato y se usa la copia de la hoja (${s.visitas.length} visitas, ${s.trat.length} tratamientos, guardada ${haceTxt(b.fecha)}). Lo que este aparato no haya enviado se pierde. ¿Continuar?`)) return;
+        state = AL.migrar(s); AL.prepararSellos(state, 0); prevSnap = structuredClone(state);
+        await dbSet('state', state); ultimoRemoto = AL.huella(AL.migrar(s)); sync.dirty = false; saveSync();
+        aplicarConex(); renderAll(); redrawSheet(); toast('Usando la copia de la hoja');
+      } catch (e) { toast(e.message || 'No se pudo leer la hoja', true); }
     };
-    $('#syOff', box).onclick = () => { sync.enabled = false; sync.dirty = false; sync.lastError = ''; saveSync(); renderStatus(); drawSync(box); toast('Copia automática desactivada'); };
+    $('#syOff', box).onclick = () => {
+      if (sync.dirty && !confirm('Este aparato tiene cambios sin enviar a la hoja. Si lo desconectas no llegarán a tus otros aparatos. ¿Desconectar?')) return;
+      sync.enabled = false; sync.dirty = false; sync.lastError = ''; saveSync(); renderStatus(); drawSync(box); toast('Este aparato ya no se junta con la hoja');
+    };
   } else {
-    box.innerHTML = `<p class="small">Copia automática a la hoja de Google «Asesor» de tu Drive y subida de las fotos. Se configura una vez con el script que se explica en el README.</p>
+    box.innerHTML = `<p class="small">Con la hoja «Asesor» de tu Drive, este aparato comparte los datos con tus otros aparatos (móvil, tablet y ordenador) y las fotos se suben a Drive. Se configura una vez con el script que se explica en el README; en cada aparato nuevo basta con la dirección y la clave del script.</p>
       <label class="fld"><span>Dirección del script (termina en /exec)</span><input id="syU" type="url" value="${esc(sync.url)}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></label>
       <label class="fld"><span>Clave</span><input id="syK" type="password" value="${esc(sync.clave)}" autocomplete="off"></label>
-      <div class="actions"><button class="btn primary" id="syOn">Probar y activar</button></div>`;
+      <div class="actions"><button class="btn primary" id="syOn">Probar y conectar</button></div>`;
     $('#syOn', box).onclick = () => activarSync($('#syU', box).value.trim(), $('#syK', box).value.trim(), box);
   }
 }
@@ -1436,19 +1507,21 @@ async function activarSync(url, clave, box) {
   if (!clave) return toast('Escribe la clave', true);
   const prev = { ...sync };
   sync.url = url; sync.clave = clave;
-  const fin = () => { sync.enabled = true; sync.dirty = true; sync.lastError = ''; syncRev++; saveSync(); renderStatus(); drawSync(box); runSync(); toast('Conectado con la hoja «Asesor»'); };
+  const fin = () => { sync.enabled = true; sync.dirty = true; sync.lastError = ''; sync.lastPull = null; syncRev++; saveSync(); renderStatus(); drawSync(box); runSync(); toast('Conectado con la hoja «Asesor»'); };
   try {
     const ping = await callSync('ping');
-    if (!ping.ok) throw new Error(ping.error === 'clave' ? 'La clave no coincide con la del script' : (ping.error || 'El script no responde'));
-    const est = await callSync('estado');
-    if (est.ok && est.estado) {
-      let info = null; try { info = JSON.parse(est.estado); } catch (_) { /* nada */ }
+    if (!ping.ok) throw new Error(errSync(ping, 'El script no responde'));
+    const b = await callSync('bajar');
+    if (!b.ok) throw new Error(errSync(b, 'No se pudo leer la hoja'));
+    if (b.estado) {
+      let info = null; try { info = JSON.parse(b.estado); } catch (_) { /* nada */ }
       const ok = AL.valido(info);
-      box.innerHTML = `<p><b>La hoja ya tiene una copia</b> (${ok ? info.visitas.length + ' visitas y ' + info.trat.length + ' tratamientos' : 'datos'}, ${haceTxt(est.fecha)}).</p>
-        <p class="small">Si este móvil es nuevo, usa la copia de la hoja. Si lo de este móvil es lo correcto, sobrescribe la hoja.</p>
-        <div class="actions"><button class="btn primary" id="syUse" ${ok ? '' : 'disabled'}>Usar la copia de la hoja en este móvil</button><button class="btn" id="syOver">Sobrescribir la hoja con este móvil</button><button class="btn" id="syCan">Cancelar</button></div>`;
-      $('#syUse', box).onclick = () => { state = AL.migrar(info); persist(); renderAll(); fin(); };
-      $('#syOver', box).onclick = fin;
+      if (!ok) throw new Error('La copia de la hoja no es válida');
+      const nuevo = AL.virgen(state);
+      box.innerHTML = `<p><b>La hoja ya tiene datos</b> (${plural(info.visitas.length, 'visita', 'visitas')}, ${plural(info.trat.length, 'tratamiento', 'tratamientos')} y ${plural((info.clientes || []).length, 'cliente', 'clientes')}; guardados ${esc(haceTxt(b.fecha))}).</p>
+        <p class="small">${nuevo ? 'Este aparato está vacío: se cargará todo lo de la hoja, también las conexiones con los maestros y con Planes de abonado.' : 'Se juntarán con los de este aparato: no se borra nada y, si un mismo dato está distinto, se queda el cambio más reciente.'}</p>
+        <div class="actions"><button class="btn primary" id="syJun">${nuevo ? 'Cargar y conectar' : 'Juntar y conectar'}</button><button class="btn" id="syCan">Cancelar</button></div>`;
+      $('#syJun', box).onclick = fin;
       $('#syCan', box).onclick = () => { sync = prev; drawSync(box); };
       return;
     }
@@ -1543,13 +1616,18 @@ async function init() {
     if (m) mx = { ...mx, ...m };
     if (y) sync = { ...sync, ...y };
     IX = mx.data ? MX.indexar(mx.data) : null;
-    if (s && s.v !== state.v) await dbSet('state', state);
-  } catch (e) { toast('No se pudieron leer los datos del móvil: ' + (e.message || e), true); }
+    // 1.2.0: sellos por registro (0 si el aparato está vacío, para no pisar nada de la hoja; 1 si ya tenía datos)
+    const sellos = AL.prepararSellos(state, AL.virgen(state) ? 0 : 1);
+    if ((s && s.v !== state.v) || sellos) await dbSet('state', state);
+  } catch (e) { toast('No se pudieron leer los datos del aparato: ' + (e.message || e), true); }
+  prevSnap = structuredClone(state);
+  if (mxOn() || paOn()) guardarConex();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   $$('.tab').forEach((b) => { b.onclick = () => { ui.tab = b.dataset.tab; renderAll(); window.scrollTo(0, 0); }; });
   $('#btnSettings').onclick = abrirAjustes;
   $('#mxStatus').onclick = abrirAjustes;
   $('#syncStatus').onclick = abrirAjustes;
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheetOpen) closeSheet(); });
   $('#fab').onclick = () => {
     if (ui.tab === 'visitas') abrirVisitaForm();
     else if (ui.tab === 'trat') abrirTratForm();
@@ -1558,9 +1636,12 @@ async function init() {
   };
   renderAll();
   await contarFotos();
-  const alVolver = () => { refreshMx({ auto: true }); refreshPlanes({ auto: true }); if (syncOn() && (sync.dirty || fotosPend)) runSync(); };
+  const alVolver = () => { refreshMx({ auto: true }); refreshPlanes({ auto: true }); runSync(); };
   window.addEventListener('online', alVolver);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { renderAll(); alVolver(); } });
+  window.addEventListener('offline', renderStatus);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { renderSoon(); alVolver(); } });
+  // Con la app a la vista, cada 3 minutos se recogen los cambios de los otros aparatos
+  setInterval(() => { if (!document.hidden) runSync(); }, 3 * 60000);
   alVolver();
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
