@@ -4,7 +4,7 @@
    sin conexión; clientes, fincas y cultivos salen de los maestros de Drive. Desde la 1.2.0 la hoja «Asesor» es la
    copia común de todos los aparatos (móvil, tablet y ordenador): cada uno la baja, la junta con lo suyo y la sube. */
 
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.3.0';
 
 /* ---------- Utilidades ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -418,7 +418,7 @@ function renderStatus() {
 }
 
 /* ---------- Pestañas ---------- */
-const ui = { tab: 'visitas', vSeg: 'toca', vTodas: false, cSeg: 'fichas', year: HOYM().y, month: HOYM().m, cobFiltro: 'todos', qT: '', qC: '' };
+const ui = { tab: 'visitas', vSeg: 'toca', vTodas: false, cSeg: 'fichas', year: HOYM().y, month: HOYM().m, cobFiltro: 'todos', qT: '', qC: '', qV: '' };
 const nomCli = (id) => { const c = AL.cliente(state, id); return c ? c.nombre : '(sin cliente)'; };
 const fincasEst = () => AL.fincasEstado(state, IX, hoy());
 
@@ -473,20 +473,33 @@ function filaVisita(v, conCliente = true) {
   return `<button class="row" data-vis="${esc(v.id)}"><div class="main"><div class="name">${esc(v.finNom || '')}</div><div class="sub">${esc([conCliente ? nomCli(v.cli) : '', cult || 'Sin plagas anotadas'].filter(Boolean).join(' · '))}</div></div>
     <div class="side small">${fF(v.fecha)}${(v.fotos || []).length ? '<br>📷 ' + v.fotos.length + (pend ? ' ⏳' : '') : ''}</div></button>`;
 }
+/* Buscador de Visitas: todas las palabras escritas tienen que aparecer (finca, alias, cliente, cultivo o acción), sin importar tildes ni mayúsculas */
+const coincide = (texto, q) => { const t = N(texto); return N(q).split(/\s+/).filter(Boolean).every((w) => t.includes(w)); };
+function fincaTexto(x) {
+  const m = IX && x.f.mid ? IX.fin.get(x.f.mid) : null;
+  return [x.f.nombre, ...((m && m.alias) || []), x.c.nombre, ...(x.f.cultivos || [])].join(' ');
+}
+const visitaTexto = (v) => [v.finNom, nomCli(v.cli), v.accion, ...(v.cultivos || []).map((c) => c.c)].join(' ');
 function viewVisitas() {
   const ini = inicioVacio(); if (ini) return ini;
   const seg = `<div class="seg">${[['toca', 'Toca visitar'], ['seg', 'Seguimientos'], ['ult', 'Últimas']].map(([k, t]) => `<button data-vseg="${k}" aria-pressed="${ui.vSeg === k}">${t}</button>`).join('')}</div>`;
+  const q = ui.qV.trim();
+  const buscador = (extra = '') => `<div class="toolbar"><input class="grow" type="search" id="qV" placeholder="Buscar finca, cliente o cultivo" value="${esc(ui.qV)}" autocomplete="off">${extra}</div>`;
+  const nada = '<div class="empty">Nada coincide con la búsqueda.</div>';
   if (ui.vSeg === 'toca') {
-    const fe = fincasEst(), L = ui.vTodas ? fe : fe.filter((x) => x.e.toca);
-    return seg + `<div class="toolbar"><button class="chip sm" data-vtodas aria-pressed="${ui.vTodas}">Ver todas las fincas (${fe.length})</button></div>` +
-      (L.length ? `<div class="list">${L.map(filaFinca).join('')}</div>` : `<div class="empty">${fe.length ? 'Ninguna finca pasada de plazo 👍' : 'Sin fincas: conecta los maestros en ⚙ Ajustes.'}</div>`);
+    const fe = fincasEst();
+    // Al buscar se mira en todas las fincas, no solo en las que tocan
+    const L = q ? fe.filter((x) => coincide(fincaTexto(x), q)) : ui.vTodas ? fe : fe.filter((x) => x.e.toca);
+    return seg + buscador(`<button class="chip sm" data-vtodas aria-pressed="${ui.vTodas}">Ver todas (${fe.length})</button>`) +
+      (q ? `<p class="small" style="margin:0 2px 8px">${plural(L.length, 'finca encontrada', 'fincas encontradas')} entre todas las fincas</p>` : '') +
+      (L.length ? `<div class="list">${L.map(filaFinca).join('')}</div>` : q ? nada : `<div class="empty">${fe.length ? 'Ninguna finca pasada de plazo 👍' : 'Sin fincas: conecta los maestros en ⚙ Ajustes.'}</div>`);
   }
   if (ui.vSeg === 'seg') {
-    const L = AL.seguimientos(state);
-    return seg + (L.length ? `<div class="list">${L.map(filaSeg).join('')}</div>` : '<div class="empty">No hay seguimientos pendientes.</div>');
+    const L = AL.seguimientos(state).filter((v) => !q || coincide(visitaTexto(v), q));
+    return seg + buscador() + (L.length ? `<div class="list">${L.map(filaSeg).join('')}</div>` : q ? nada : '<div class="empty">No hay seguimientos pendientes.</div>');
   }
-  const L = AL.recientes(state.visitas).slice(0, 60);
-  return seg + (L.length ? `<div class="list">${L.map((v) => filaVisita(v)).join('')}</div>` + (state.visitas.length > 60 ? '<p class="small" style="text-align:center">Se muestran las 60 últimas. El resto está en cada ficha de cliente y en la hoja.</p>' : '') : '<div class="empty">Todavía no hay visitas.</div>');
+  const T = AL.recientes(state.visitas).filter((v) => !q || coincide(visitaTexto(v), q)), L = T.slice(0, 60);
+  return seg + buscador() + (L.length ? `<div class="list">${L.map((v) => filaVisita(v)).join('')}</div>` + (T.length > 60 ? `<p class="small" style="text-align:center">Se muestran las 60 últimas${q ? ' de ' + T.length : ''}. ${q ? 'Afina la búsqueda para ver el resto.' : 'El resto está en cada ficha de cliente y en la hoja.'}</p>` : '') : q ? nada : '<div class="empty">Todavía no hay visitas.</div>');
 }
 
 /* ----- Tratamientos ----- */
@@ -605,6 +618,7 @@ function wireView() {
   $$('[data-imp]', v).forEach((i) => { i.onchange = () => { const n = parseNum(i.value); commit((c) => { const r = c.años[ui.year][i.dataset.imp]; r.imp[ui.month] = isFinite(n) ? n : 0; r.man[ui.month] = true; }); }; i.onkeydown = (e) => { if (e.key === 'Enter') i.blur(); }; });
   $$('[data-cob]', v).forEach((i) => { i.onchange = () => commit((c) => { c.años[ui.year][i.dataset.cob].cob[ui.month] = i.checked; }); });
   const qT = $('#qT', v); if (qT) qT.oninput = () => { ui.qT = qT.value; const p = qT.selectionStart; renderAll(); const n = $('#qT'); n.focus(); n.setSelectionRange(p, p); };
+  const qV = $('#qV', v); if (qV) qV.oninput = () => { ui.qV = qV.value; const p = qV.selectionStart; renderAll(); const n = $('#qV'); n.focus(); n.setSelectionRange(p, p); };
   const qC = $('#qC', v); if (qC) qC.oninput = () => { ui.qC = qC.value; const p = qC.selectionStart; renderAll(); const n = $('#qC'); n.focus(); n.setSelectionRange(p, p); };
 }
 function marcarHecho(id) {
