@@ -122,7 +122,7 @@
     return {
       v: 1, clientes: [], fincasNuevas: [], cultivosExtra: {}, visitas: [], trat: [], plantillas: [], productos: [],
       plagas: [], fenologias: [], cultivos: ['Limonero', 'Naranjo', 'Pomelo', 'Mandarino', 'Almendro', 'Albaricoquero', 'Melocotonero', 'Nectarino', 'Paraguayo', 'Olivo', 'Otro'],
-      años: {}, ajustes: { marca: 'FG Agro', dias: { ...DIAS_DEFECTO } }, mxPend: [], importes: {},
+      años: {}, ajustes: { marca: 'FG Agro', dias: { ...DIAS_DEFECTO } }, mxPend: [], importes: {}, tareas: [], hechas: [],
     };
   }
   function migrar(s) {
@@ -131,7 +131,7 @@
     const st = { ...b, ...s };
     st.ajustes = { ...b.ajustes, ...(s.ajustes || {}) };
     st.ajustes.dias = { ...DIAS_DEFECTO, ...((s.ajustes || {}).dias || {}) };
-    for (const k of ['clientes', 'fincasNuevas', 'visitas', 'trat', 'plantillas', 'productos', 'plagas', 'fenologias', 'cultivos', 'mxPend']) if (!Array.isArray(st[k])) st[k] = b[k];
+    for (const k of ['clientes', 'fincasNuevas', 'visitas', 'trat', 'plantillas', 'productos', 'plagas', 'fenologias', 'cultivos', 'mxPend', 'tareas', 'hechas']) if (!Array.isArray(st[k])) st[k] = b[k];
     for (const k of ['cultivosExtra', 'años', 'importes']) if (!st[k] || typeof st[k] !== 'object') st[k] = {};
     st.v = 1;
     return st;
@@ -208,6 +208,58 @@
   const seguimientos = (st, cliId) => st.visitas.filter((v) => v.accion && !v.hecho && (!cliId || v.cli === cliId))
     .sort((a, b) => (a.seg || a.fecha || '9999').localeCompare(b.seg || b.fecha || '9999') || (a.fecha || '').localeCompare(b.fecha || ''));
   const recientes = (xs) => xs.slice().sort((a, b) => (b.fecha || '').localeCompare(a.fecha || '') || (b.ts || 0) - (a.ts || 0));
+
+  /* ---------- Organización: tareas por semana (desde 1.4.0) ----------
+     Tarea: { id, tipo, cli, fin, finNom, texto, limite (domingo de la semana), prioridad, vis (seguimiento), mes (plan, AAAA-MM), creada, ts }.
+     Al terminarse sale de «tareas» y queda en «hechas» (registro oculto, para la Vista única). */
+  const TIPOS_TAREA = ['Visita', 'Seguimiento', 'Tratamiento', 'Plan', 'Otra'];
+  const PRIORIDADES = ['Alta', 'Media', 'Baja'];
+  const PRIO_ORDEN = { Alta: 0, Media: 1, Baja: 2 };
+  // Semanas de lunes a domingo: la fecha límite es el domingo
+  const diaSemana = (t) => new Date(aUTC(t)).getUTCDay();
+  const domingoDe = (t) => sumarDias(t, (7 - diaSemana(t)) % 7);
+  const domingoEn = (hoy, n) => sumarDias(domingoDe(hoy), 7 * n);
+  const vencida = (t, hoy) => !!t.limite && t.limite < hoy;
+  /* Grupo de la lista: -1 vencidas, 0 esta semana, 1 la que viene, 2 dentro de 2, 3 más adelante, 9 sin fecha */
+  function grupoSemana(t, hoy) {
+    if (!t.limite) return 9;
+    if (t.limite < hoy) return -1;
+    const n = Math.round(diffDias(domingoDe(t.limite), domingoDe(hoy)) / 7);
+    return n <= 0 ? 0 : n >= 3 ? 3 : n;
+  }
+  const ordenarTareas = (L, hoy) => L.slice().sort((a, b) => grupoSemana(a, hoy) - grupoSemana(b, hoy) || (PRIO_ORDEN[a.prioridad] ?? 1) - (PRIO_ORDEN[b.prioridad] ?? 1)
+    || (a.limite || '9999').localeCompare(b.limite || '9999') || (a.ts || 0) - (b.ts || 0));
+  const mesDe = (ymTxt) => { const p = String(ymTxt || '').split('-'); return { y: +p[0], m: +p[1] - 1 }; };
+  /* Pasa una tarea a «hechas». Devuelve la tarea o null. */
+  function terminarTarea(st, id, hoy) {
+    const t = (st.tareas || []).find((x) => x.id === id); if (!t) return null;
+    st.tareas = st.tareas.filter((x) => x.id !== id);
+    if (!Array.isArray(st.hechas)) st.hechas = [];
+    if (!st.hechas.some((x) => x.id === id)) st.hechas.push({ id: t.id, tipo: t.tipo, cli: t.cli || null, fin: t.fin || null, finNom: t.finNom || '', texto: t.texto || '', prioridad: t.prioridad || 'Media', limite: t.limite || '', creada: t.creada || '', hecha: hoy });
+    return t;
+  }
+  /* Tareas que se cierran solas: visita registrada a esa finca (desde que se planificó), seguimiento ya hecho
+     (o visita borrada) y plan del mes marcado como enviado. Devuelve cuántas se cierran. */
+  function cerrarSolas(st, hoy) {
+    let n = 0;
+    for (const t of (st.tareas || []).slice()) {
+      let cerrar = false, cuando = hoy;
+      if (t.tipo === 'Visita' && t.fin) {
+        // Visita posterior a cuando se planificó (si es del mismo día, guardada después de planificarla)
+        const v = st.visitas.filter((x) => x.fin === t.fin && x.fecha && (x.fecha > (t.creada || '') || (x.fecha === t.creada && (x.ts || 0) > (t.ts || 0))))
+          .sort((a, b) => a.fecha.localeCompare(b.fecha))[0];
+        if (v) { cerrar = true; cuando = v.fecha; }
+      } else if (t.tipo === 'Seguimiento' && t.vis) {
+        const v = st.visitas.find((x) => x.id === t.vis);
+        cerrar = !v || !v.accion || !!v.hecho;
+      } else if (t.tipo === 'Plan' && t.cli && t.mes) {
+        const { y, m } = mesDe(t.mes); const r = (st.años[y] || {})[t.cli];
+        cerrar = !!(r && r.env[m] === 'E');
+      }
+      if (cerrar) { terminarTarea(st, t.id, cuando); n++; }
+    }
+    return n;
+  }
 
   /* ---------- enlace con los maestros ---------- */
   function buscarFincaCli(st, ix, cliId, nombre) {
@@ -463,7 +515,7 @@
      El estado se ve como un conjunto de registros con clave (un cliente, una visita, un mes de planes y cobros
      de un cliente…). Cada registro lleva la hora de su último cambio (st.sello) y los borrados dejan su hora
      (st.borrados). Al juntar dos copias, en cada registro gana el cambio más reciente; si empatan, la de la hoja. */
-  const COLS = { clientes: ['cli', 'id'], fincasNuevas: ['fn', 'id'], visitas: ['vis', 'id'], trat: ['tr', 'id'], productos: ['pr', 'id'], mxPend: ['mp', 'k'] };
+  const COLS = { clientes: ['cli', 'id'], fincasNuevas: ['fn', 'id'], visitas: ['vis', 'id'], trat: ['tr', 'id'], productos: ['pr', 'id'], mxPend: ['mp', 'k'], tareas: ['ta', 'id'], hechas: ['th', 'id'] };
   const LISTAS = { plagas: ['pg', (x) => x && x.nombre], fenologias: ['fe', (x) => x && x.nombre], plantillas: ['pl', (x) => x && x.nombre], cultivos: ['cu', (x) => x] };
   const CONOCIDAS = new Set(['v', 'sello', 'borrados', 'cultivosExtra', 'años', 'ajustes', 'importes', ...Object.keys(COLS), ...Object.keys(LISTAS)]);
   const J = (v) => JSON.stringify(v === undefined ? null : v);
@@ -496,7 +548,7 @@
   }
   /* Map clave → JSON → estado */
   function reconstruir(m) {
-    const st = { v: 1, clientes: [], fincasNuevas: [], cultivosExtra: {}, visitas: [], trat: [], plantillas: [], productos: [], plagas: [], fenologias: [], cultivos: [], años: {}, ajustes: { dias: {} }, mxPend: [], importes: {} };
+    const st = { v: 1, clientes: [], fincasNuevas: [], cultivosExtra: {}, visitas: [], trat: [], plantillas: [], productos: [], plagas: [], fenologias: [], cultivos: [], años: {}, ajustes: { dias: {} }, mxPend: [], importes: {}, tareas: [], hechas: [] };
     const porPre = {}; for (const [col, [pre]] of Object.entries(COLS)) porPre[pre] = col;
     const listas = {}; for (const [lista, [pre]] of Object.entries(LISTAS)) listas[pre] = { lista, items: new Map(), orden: [] };
     const filas = {};
@@ -517,7 +569,7 @@
       else if (pre === 'ad') st.ajustes.dias[resto] = v;
       else if (pre === 'aj') st.ajustes[resto] = v;
       else if (pre === 'im') st.importes[resto] = v;
-      else if (pre === 'x') st[resto] = v;
+      else if (pre === 'x') { if (!COLS[resto]) st[resto] = v; } // «tareas» y «hechas» sueltas de una versión antigua: no pisan los registros
     }
     for (const L of Object.values(listas)) {
       const vistos = new Set();
@@ -630,6 +682,12 @@
       return [c.nombre, c.mid || '', fs.length, ests.filter((e) => e.toca).length, ult ? ult.fecha : '', ult ? ult.finNom : '',
         st.trat.filter((t) => t.cli === c.id).length, r ? r.planes : '', r ? r.precio : '', cobrado, pend, c.alta || '', c.baja || ''];
     });
+    const tar = ordenarTareas(st.tareas || [], hoy).map((t) => {
+      const g = grupoSemana(t, hoy);
+      return [t.limite || '', ['Vencida', 'Esta semana', 'La semana que viene', 'Dentro de 2 semanas', 'Más adelante'][g + 1] || 'Sin fecha', t.tipo, t.prioridad || '', nomCli(t.cli), midCli(t.cli), t.finNom || '', t.texto || '', t.mes || '', t.creada || '', t.id];
+    });
+    const hec = (st.hechas || []).slice().sort((a, b) => (b.hecha || '').localeCompare(a.hecha || '')).map((t) => [
+      t.hecha || '', t.limite || '', t.limite ? (t.hecha <= t.limite ? 'Sí' : 'No') : '', t.tipo, t.prioridad || '', nomCli(t.cli), midCli(t.cli), t.finNom || '', t.texto || '', t.creada || '', t.id]);
     const EUR = '#,##0.00', F = 'dd/mm/yyyy';
     return [
       { nombre: 'Clientes', cabecera: ['Cliente', 'ID cliente', 'Fincas', 'Fincas que toca visitar', 'Última visita', 'Finca última visita', 'Tratamientos', 'Planes ' + y0, 'Precio/mes (€)', 'Cobrado ' + y0 + ' (€)', 'Pendiente ' + y0 + ' (€)', 'Primer mes', 'Baja (último mes)'], filas: cli, fechas: [4], formatos: [null, null, '0', '0', F, null, '0', '0', EUR, EUR, EUR, null, null] },
@@ -637,7 +695,16 @@
       { nombre: 'Tratamientos', cabecera: ['Fecha', 'Cliente', 'ID cliente', 'Finca', 'Cultivo', 'Problema', 'Plazo de seguridad', 'Nº mezcla', 'Producto', 'ID producto', 'Formulación', 'Dosis /1000 L', 'Unidad', 'Condiciones de aplicación', 'Observaciones', 'ID tratamiento'], filas: tra, fechas: [0], formatos: [F, null, null, null, null, null, null, '0', null, null, null, '#,##0.###', null, null, null, null] },
       { nombre: 'Planes', cabecera: ['Año', 'Cliente', 'ID cliente', 'Planes', ...MC], filas: pla, fechas: [], formatos: ['0', null, null, '0'] },
       { nombre: 'Cobros', cabecera: ['Año', 'Cliente', 'ID cliente', 'Mes', 'Importe (€)', 'Cobrado', 'Precio/mes (€)'], filas: cob, fechas: [], formatos: ['0', null, null, null, EUR, null, EUR] },
+      { nombre: 'Tareas', cabecera: ['Semana (domingo)', 'Cuándo', 'Tipo', 'Prioridad', 'Cliente', 'ID cliente', 'Finca', 'Tarea', 'Mes del plan', 'Apuntada', 'ID tarea'], filas: tar, fechas: [0, 9], formatos: [F, null, null, null, null, null, null, null, null, F, null] },
+      { nombre: 'Tareas hechas', cabecera: ['Hecha', 'Semana prevista (domingo)', 'En plazo', 'Tipo', 'Prioridad', 'Cliente', 'ID cliente', 'Finca', 'Tarea', 'Apuntada', 'ID tarea'], filas: hec, fechas: [0, 1, 9], formatos: [F, F, null, null, null, null, null, null, null, F, null] },
     ];
+  }
+  /* Tareas con fecha para el calendario «Asesor» de Google */
+  function tareasCalendario(st) {
+    return (st.tareas || []).filter((t) => t.limite).map((t) => {
+      const c = cliente(st, t.cli);
+      return { id: t.id, tipo: t.tipo, prioridad: t.prioridad || 'Media', cliente: c ? c.nombre : '', finca: t.finNom || '', texto: t.texto || '', limite: t.limite };
+    });
   }
 
   const api = {
@@ -649,6 +716,7 @@
     buscarFincaCli, choqueAnios, unirCliente, cambiarFinca, aplicarMaestros, asegurarCliente, asegurarFinca, asegurarProducto,
     importarVisitas, importarGenerador, importarClientes, detectarCopia, tablas,
     aplanar, reconstruir, prepararSellos, virgen, sellar, fusionar, huella,
+    TIPOS_TAREA, PRIORIDADES, PRIO_ORDEN, domingoDe, domingoEn, vencida, grupoSemana, ordenarTareas, mesDe, terminarTarea, cerrarSolas, tareasCalendario,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.AL = api;
 })(typeof window !== 'undefined' ? window : globalThis);

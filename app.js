@@ -4,7 +4,7 @@
    sin conexión; clientes, fincas y cultivos salen de los maestros de Drive. Desde la 1.2.0 la hoja «Asesor» es la
    copia común de todos los aparatos (móvil, tablet y ordenador): cada uno la baja, la junta con lo suyo y la sube. */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 
 /* ---------- Utilidades ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -86,6 +86,7 @@ let saveChain = Promise.resolve();
 /* Última versión sellada: al guardar, los registros que han cambiado desde ella llevan la hora del cambio */
 let prevSnap = null;
 function persist() {
+  AL.cerrarSolas(state, hoy()); // tareas de Organización que se cierran solas (visita hecha, seguimiento hecho, plan enviado)
   if (prevSnap) AL.sellar(prevSnap, state, Date.now());
   prevSnap = structuredClone(state);
   const copia = state;
@@ -299,6 +300,9 @@ function drawPa(box) {
 let sync = { url: '', clave: '', enabled: false, dirty: false, lastOk: null, lastPull: null, lastError: '', rev: 0 };
 let syncRunning = false, syncTimer = null, syncRetry = null, syncRev = 0, fotosPend = 0, fotosRunning = false;
 let ultimoRemoto = null; // huella de la última copia vista en la hoja
+/* Calendario «Asesor»: tras actualizar, se manda una vez aunque no haya cambios para llenar el calendario */
+const CAL_VER = '1';
+let calPend = true;
 const syncOn = () => !!(sync.enabled && sync.url && sync.clave);
 const callSync = (accion, extra, ms) => postScript(sync.url, sync.clave, accion, extra, ms);
 function saveSync() { dbSet('sync', sync).catch(() => {}); }
@@ -366,10 +370,16 @@ async function runSync() {
     if (n && sync.lastPull) toast(plural(n, 'cambio recibido', 'cambios recibidos') + ' de tus otros aparatos');
     sync.lastPull = new Date().toISOString();
     await subirFotos();
-    for (let i = 0; i < 4 && AL.huella(state) !== ultimoRemoto; i++) {
+    if (sync.calVer === CAL_VER) calPend = false;
+    for (let i = 0; i < 4 && (AL.huella(state) !== ultimoRemoto || calPend); i++) {
       const env = state;
-      const p = await callSync('subir', { base, tablas: AL.tablas(env, IX, hoy()), estado: JSON.stringify(env), version: APP_VERSION }, 90000);
-      if (p.ok) { base = Number(p.rev) || base + 1; ultimoRemoto = AL.huella(env); sync.lastOk = new Date().toISOString(); continue; }
+      const p = await callSync('subir', { base, tablas: AL.tablas(env, IX, hoy()), estado: JSON.stringify(env), version: APP_VERSION, cal: AL.tareasCalendario(env) }, 90000);
+      if (p.ok) {
+        base = Number(p.rev) || base + 1; ultimoRemoto = AL.huella(env); sync.lastOk = new Date().toISOString(); calPend = false;
+        sync.cal = p.calendario || { viejo: true };
+        sync.calVer = p.calendario && p.calendario.ok ? CAL_VER : '';
+        continue;
+      }
       if (p.conflicto) { recibir(p.estado); base = Number(p.rev) || 0; continue; }
       throw new Error(errSync(p, 'No se pudo enviar a la hoja'));
     }
@@ -415,10 +425,18 @@ function renderStatus() {
   const b = $('#mxStatus'); if (b) { b.textContent = mxStatusText(); b.hidden = !mxOn() || !(mx.lastError || mxRunning || !mx.data || state.mxPend.length); }
   const c = $('#syncLine'); if (c) c.textContent = syncStatusText();
   const d = $('#mxLine'); if (d) d.textContent = mxStatusText() || 'Sin conectar';
+  const e = $('#calLine'); if (e) e.textContent = calStatusText();
+}
+function calStatusText() {
+  const c = sync.cal;
+  if (!c) return '📅 Calendario «Asesor»: se enviará en la próxima vez que se junte';
+  if (c.viejo) return '📅 Calendario «Asesor»: falta actualizar el script de la hoja (ver README: «Calendario»)';
+  if (c.ok) return `📅 Calendario «Asesor» al día · ${plural(c.eventos, 'tarea con semana', 'tareas con semana')}`;
+  return /permiso|permission|authoriz|autoriz|scope|access/i.test(c.error || '') ? '📅 Calendario «Asesor»: falta dar el permiso de Calendar en el script (ver README)' : '📅 Calendario «Asesor»: no se pudo · ' + (c.error || 'error del script');
 }
 
 /* ---------- Pestañas ---------- */
-const ui = { tab: 'visitas', vSeg: 'toca', vTodas: false, cSeg: 'fichas', year: HOYM().y, month: HOYM().m, cobFiltro: 'todos', qT: '', qC: '', qV: '' };
+const ui = { tab: 'visitas', oCli: 'todos', oTipo: 'Todos', oPrio: 'Todas', oSem: 'todas', vSeg: 'toca', vTodas: false, cSeg: 'fichas', year: HOYM().y, month: HOYM().m, cobFiltro: 'todos', qT: '', qC: '', qV: '' };
 const nomCli = (id) => { const c = AL.cliente(state, id); return c ? c.nombre : '(sin cliente)'; };
 const fincasEst = () => AL.fincasEstado(state, IX, hoy());
 
@@ -428,6 +446,7 @@ function renderAll() {
   fab.hidden = false;
   if (ui.tab === 'visitas') { head.innerHTML = headVisitas(); view.innerHTML = viewVisitas(); $('#fabLabel').textContent = 'Nueva visita'; }
   else if (ui.tab === 'trat') { head.innerHTML = headTrat(); view.innerHTML = viewTrat(); $('#fabLabel').textContent = 'Nuevo tratamiento'; }
+  else if (ui.tab === 'org') { head.innerHTML = headOrg(); view.innerHTML = viewOrg(); $('#fabLabel').textContent = 'Nueva tarea'; }
   else {
     head.innerHTML = headClientes(); view.innerHTML = viewClientes();
     $('#fabLabel').textContent = ui.cSeg === 'fichas' ? 'Cliente' : 'Cliente en ' + ui.year;
@@ -436,6 +455,8 @@ function renderAll() {
   renderStatus();
   const nToca = fincasEst().filter((x) => x.e.toca).length, nSeg = AL.seguimientos(state).filter((v) => v.seg && v.seg < hoy()).length;
   const bv = $('#badgeVis'); bv.textContent = nSeg || ''; bv.hidden = !nSeg;
+  const nOrg = state.tareas.filter((t) => AL.grupoSemana(t, hoy()) <= 0 && t.limite).length, nVenc = state.tareas.filter((t) => AL.vencida(t, hoy())).length;
+  const bo = $('#badgeOrg'); bo.textContent = nOrg || ''; bo.hidden = !nOrg; bo.classList.toggle('warn', !nVenc);
   $('#topSub').textContent = state.clientes.length ? plural(AL.delAsesor(state).length, 'cliente', 'clientes') + ' · ' + plural(nToca, 'finca toca visitar', 'fincas tocan visitar') : '';
 }
 const kpi = (label, val, cls = '') => `<div class="k ${cls}"><span>${esc(label)}</span><strong>${val}</strong></div>`;
@@ -458,13 +479,17 @@ function headVisitas() {
 }
 function filaFinca(x) {
   const cult = (x.f.cultivos || []).join(', ');
-  return `<button class="row" data-visfin="${esc(x.f.id)}" data-cli="${esc(x.c.id)}"><div class="main"><div class="name">${esc(x.f.nombre)}${x.f.nueva ? '<span class="tag" style="background:var(--warn-soft);color:var(--warn)">nueva</span>' : ''}</div><div class="sub">${esc([x.c.nombre, cult].filter(Boolean).join(' · '))}</div></div>
-    <div class="side"><div class="${x.e.toca ? 'neg' : ''}" style="font-weight:600">${esc(x.e.texto)}</div><div class="small">cada ${x.e.frec} d</div></div></button>`;
+  const t = state.tareas.find((y) => y.tipo === 'Visita' && y.fin === x.f.id);
+  const plan = t ? `<button class="pill plan${AL.vencida(t, hoy()) ? ' venc' : ''}" data-tarea="${esc(t.id)}">📅 ${esc(semanaTxt(t))}</button>`
+    : `<span class="small">Planificar:</span>${SEMANAS.slice(0, 2).map(([txt, n]) => `<button class="chip xs" data-planif="${esc(x.f.id)}" data-cli="${esc(x.c.id)}" data-n="${n}">${txt}</button>`).join('')}`;
+  return `<div class="fcard"><button class="row" data-visfin="${esc(x.f.id)}" data-cli="${esc(x.c.id)}"><div class="main"><div class="name">${esc(x.f.nombre)}${x.f.nueva ? '<span class="tag" style="background:var(--warn-soft);color:var(--warn)">nueva</span>' : ''}</div><div class="sub">${esc([x.c.nombre, cult].filter(Boolean).join(' · '))}</div></div>
+    <div class="side"><div class="${x.e.toca ? 'neg' : ''}" style="font-weight:600">${esc(x.e.texto)}</div><div class="small">cada ${x.e.frec} d</div></div></button><div class="plan">${plan}</div></div>`;
 }
 function filaSeg(v) {
   const venc = v.seg && v.seg < hoy();
   return `<div class="mini ${venc ? 'vencido' : ''}"><button class="main" style="background:none;border:0;padding:0;text-align:left;flex:1;min-width:0" data-vis="${esc(v.id)}"><div class="name">${esc(v.accion)}</div>
     <div class="sub">${esc(nomCli(v.cli))} · ${esc(v.finNom || '')}</div><div class="sub fecha">${v.seg ? (venc ? 'Vencido el ' : 'Para el ') + fF(v.seg) : 'Sin fecha · visita del ' + fF(v.fecha)}</div></button>
+    ${(() => { const t = state.tareas.find((y) => y.tipo === 'Seguimiento' && y.vis === v.id); return t ? `<button class="paid on" data-tarea="${esc(t.id)}">📅 ${esc(fechaCorta(t.limite) || 'sin fecha')}</button>` : `<button class="paid" data-planseg="${esc(v.id)}">Planificar</button>`; })()}
     <button class="paid" data-hecho="${esc(v.id)}">Hecho</button></div>`;
 }
 function filaVisita(v, conCliente = true) {
@@ -595,6 +620,12 @@ function wireView() {
   $$('[data-visfin]', v).forEach((b) => { b.onclick = () => abrirVisitaForm({ cli: b.dataset.cli, fin: b.dataset.visfin }); });
   $$('[data-vis]', v).forEach((b) => { b.onclick = () => abrirVisita(b.dataset.vis); });
   $$('[data-hecho]', v).forEach((b) => { b.onclick = () => marcarHecho(b.dataset.hecho); });
+  $$('[data-planif]', v).forEach((b) => { b.onclick = () => planificarVisita(b.dataset.cli, b.dataset.planif, Number(b.dataset.n)); });
+  $$('[data-planseg]', v).forEach((b) => { b.onclick = () => { const vi = state.visitas.find((x) => x.id === b.dataset.planseg); if (vi) abrirTareaForm(null, { tipo: 'Seguimiento', cli: vi.cli, fin: vi.fin, texto: vi.accion, vis: vi.id, limite: vi.seg ? AL.domingoDe(vi.seg) : AL.domingoEn(hoy(), 0) }); }; });
+  $$('[data-tarea]', v).forEach((b) => { b.onclick = () => abrirTareaForm(state.tareas.find((x) => x.id === b.dataset.tarea)); });
+  $$('[data-ofil]', v).forEach((el) => { el.onchange = () => { ui[el.dataset.ofil] = el.value; renderAll(); }; });
+  $$('[data-oprio]', v).forEach((b) => { b.onclick = () => { ui.oPrio = b.dataset.oprio; renderAll(); }; });
+  $$('[data-osem]', v).forEach((b) => { b.onclick = () => { ui.oSem = b.dataset.osem; renderAll(); }; });
   $$('[data-trat]', v).forEach((b) => { b.onclick = () => abrirTrat(b.dataset.trat); });
   $$('[data-ficha]', v).forEach((b) => { b.onclick = () => abrirFicha(b.dataset.ficha); });
   $$('[data-cseg]', v).forEach((b) => { b.onclick = () => { ui.cSeg = b.dataset.cseg; renderAll(); }; });
@@ -623,6 +654,146 @@ function wireView() {
 }
 function marcarHecho(id) {
   if (commit((c) => { const v = c.visitas.find((x) => x.id === id); if (v) v.hecho = true; })) { toast('Seguimiento hecho'); redrawSheet(); }
+}
+
+/* ---------- Organización: tareas de clientes por semana ----------
+   Visitas (desde «Toca visitar»), seguimientos (botón «Planificar»), tratamientos, planes y otras.
+   La fecha límite es el domingo de la semana. Al terminar, la tarea pasa al registro oculto «hechas». */
+const SEMANAS = [['Esta semana', 0], ['La que viene', 1], ['En 2 semanas', 2]];
+const ICONO_TIPO = { Visita: '📍', Seguimiento: '🔁', Tratamiento: '🧪', Plan: '📄', Otra: '📝' };
+const GRUPOS = { '-1': 'Vencidas', 0: 'Esta semana', 1: 'La semana que viene', 2: 'Dentro de 2 semanas', 3: 'Más adelante', 9: 'Sin fecha' };
+const fechaCorta = (t) => (t ? new Date(t + 'T12:00:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' }) : '');
+function semanaTxt(t) {
+  if (!t.limite) return 'sin fecha';
+  const d = AL.diffDias(t.limite, hoy());
+  if (d < 0) return 'vencida hace ' + plural(-d, 'día', 'días');
+  return ['esta semana', 'la que viene', 'en 2 semanas'][AL.grupoSemana(t, hoy())] || 'hasta el ' + fechaCorta(t.limite);
+}
+const mesTxt = (k) => { const { y, m } = AL.mesDe(k); return AL.MES[m] + ' ' + y; };
+const mesMas = (n) => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + n); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); };
+function textoTarea(t) {
+  if (t.texto) return t.texto;
+  if (t.tipo === 'Visita') return 'Visitar ' + (t.finNom || 'finca');
+  if (t.tipo === 'Plan') return 'Plan de abonado' + (t.mes ? ' de ' + mesTxt(t.mes).toLowerCase() : '');
+  if (t.tipo === 'Tratamiento') return 'Recomendación de tratamiento';
+  return t.tipo;
+}
+function planificarVisita(cli, fin, n) {
+  const f = AL.finca(state, IX, fin);
+  const lim = AL.domingoEn(hoy(), n);
+  if (commit((s) => { s.tareas.push({ id: uid('ta'), tipo: 'Visita', cli, fin, finNom: f ? f.nombre : '', texto: '', limite: lim, prioridad: 'Media', creada: hoy(), ts: Date.now() }); }))
+    toast('Visita planificada hasta el domingo ' + fechaCorta(lim));
+}
+function headOrg() {
+  const T = state.tareas, h = hoy();
+  const sem = T.filter((t) => t.limite && AL.grupoSemana(t, h) === 0).length, venc = T.filter((t) => AL.vencida(t, h)).length;
+  return `<div class="kpis three">${kpi('Esta semana', sem)}${kpi('Vencidas', venc, venc ? 'warn' : '')}${kpi('Pendientes', T.length)}</div>`;
+}
+function viewOrg() {
+  const ini = inicioVacio(); if (ini) return ini;
+  const h = hoy();
+  const clis = AL.delAsesor(state).filter((c) => state.tareas.some((t) => t.cli === c.id));
+  if (ui.oCli !== 'todos' && !clis.some((c) => c.id === ui.oCli)) ui.oCli = 'todos';
+  const base = state.tareas.filter((t) => (ui.oCli === 'todos' || t.cli === ui.oCli) && (ui.oTipo === 'Todos' || t.tipo === ui.oTipo));
+  const enSem = (t) => { const g = AL.grupoSemana(t, h); return ui.oSem === 'todas' || (ui.oSem === 'venc' ? g === -1 : ui.oSem === 'mas' ? g >= 2 : String(g) === ui.oSem); };
+  const L = AL.ordenarTareas(base.filter((t) => (ui.oPrio === 'Todas' || t.prioridad === ui.oPrio) && enSem(t)), h);
+  const nP = (p) => base.filter((t) => t.prioridad === p && enSem(t)).length;
+  let html = `<div class="toolbar"><select class="grow" data-ofil="oCli" aria-label="Cliente"><option value="todos">Todos los clientes</option>${clis.map((c) => opt(c.id, c.nombre, c.id === ui.oCli)).join('')}</select>
+    <select data-ofil="oTipo" aria-label="Tipo" style="width:auto;flex:0 0 auto">${['Todos', ...AL.TIPOS_TAREA].map((t) => opt(t, t === 'Todos' ? 'Todos los tipos' : ICONO_TIPO[t] + ' ' + t, t === ui.oTipo)).join('')}</select></div>
+    <div class="chips">${[['todas', 'Todas'], ['venc', 'Vencidas'], ['0', 'Esta semana'], ['1', 'La que viene'], ['mas', 'Más adelante']].map(([k, t]) => `<button class="chip sm" data-osem="${k}" aria-pressed="${ui.oSem === k}">${t}</button>`).join('')}</div>
+    <div class="chips">${['Todas', ...AL.PRIORIDADES].map((p) => `<button class="chip sm${p === 'Todas' ? '' : ' prio-' + p.toLowerCase()}" data-oprio="${p}" aria-pressed="${ui.oPrio === p}">${p}${p === 'Todas' ? '' : ' · ' + nP(p)}</button>`).join('')}</div>`;
+  if (!L.length) return html + `<div class="empty">${state.tareas.length ? 'No hay tareas en este filtro.' : 'Aún no tienes tareas.<br>Planifica visitas desde «Toca visitar», seguimientos desde «Seguimientos» o pulsa «Nueva tarea».'}</div>`;
+  let g0 = null;
+  for (const t of L) {
+    const g = AL.grupoSemana(t, h);
+    if (g !== g0) {
+      if (g0 !== null) html += '</div>';
+      g0 = g;
+      const dom = g >= 0 && g <= 2 ? ' · hasta el domingo ' + fechaCorta(AL.domingoEn(h, g)) : '';
+      html += `<div class="day sem${g === -1 ? ' neg' : ''}">${GRUPOS[g]}${dom} <span>· ${L.filter((x) => AL.grupoSemana(x, h) === g).length}</span></div><div class="list">`;
+    }
+    const venc = AL.vencida(t, h);
+    html += `<button class="row tarea prio-${(t.prioridad || 'Media').toLowerCase()}${venc ? ' venc' : ''}" data-tarea="${esc(t.id)}"><div class="main"><div class="name">${ICONO_TIPO[t.tipo] || ''} ${esc(textoTarea(t))}</div>
+      <div class="sub"><span class="pill prio">${esc(t.prioridad || 'Media')}</span>${esc([t.tipo, t.cli ? nomCli(t.cli) : '', t.tipo !== 'Visita' ? t.finNom : ''].filter(Boolean).join(' · '))}</div></div>
+      <div class="side small${venc ? ' neg' : ''}">${esc(semanaTxt(t))}</div></button>`;
+  }
+  return html + '</div><p class="small" style="margin:14px 4px">Las visitas se cierran solas al guardar una visita a esa finca. Las demás: abre la tarea y pulsa el botón de terminar.</p>';
+}
+
+let ftar = null;
+function abrirTareaForm(orig, pre = {}) {
+  const nueva = !orig;
+  ftar = orig ? { ...orig } : { id: null, tipo: pre.tipo || 'Visita', cli: pre.cli || '', fin: pre.fin || '', texto: pre.texto || '', vis: pre.vis || null, mes: pre.mes || mesMas(0), limite: pre.limite || AL.domingoEn(hoy(), 0), prioridad: pre.prioridad || 'Media' };
+  if (!ftar.mes) ftar.mes = mesMas(0);
+  const titulo = nueva ? (ftar.tipo === 'Seguimiento' ? 'Planificar seguimiento' : 'Nueva tarea') : 'Tarea';
+  openSheet(titulo, '', () => dibujarTareaForm(nueva));
+  dibujarTareaForm(nueva);
+}
+function dibujarTareaForm(nueva) {
+  const body = $('.sheet-body', sheetRoot); if (!body || !ftar) return;
+  const f = ftar, h = hoy();
+  const clis = AL.delAsesor(state).filter((c) => AL.activo(c, h) || c.id === f.cli);
+  const fincas = f.cli ? AL.fincasDe(state, IX, f.cli) : [];
+  if (f.fin && !fincas.some((x) => x.id === f.fin)) { const fo = AL.finca(state, IX, f.fin); fincas.push({ id: f.fin, nombre: (fo && fo.nombre) || f.finNom || f.fin }); }
+  const tipos = f.tipo === 'Seguimiento' ? ['Seguimiento'] : AL.TIPOS_TAREA.filter((t) => t !== 'Seguimiento');
+  const conFinca = f.tipo !== 'Plan';
+  const { y, m } = AL.mesDe(f.mes);
+  const sinPlanes = f.tipo === 'Plan' && f.cli && !((state.años[y] || {})[f.cli] && state.años[y][f.cli].planes > 0);
+  const otra = !!f.limite && !SEMANAS.some(([, n]) => f.limite === AL.domingoEn(h, n));
+  const fin = { Visita: ['Registrar visita', 'Se cierra sola al guardar la visita.'], Seguimiento: ['✓ Hecho', 'Marca también la acción pendiente de la visita como hecha.'], Tratamiento: ['Hacer tratamiento', 'Abre el formulario de tratamiento con el cliente y la finca; la tarea se cierra al guardarlo.'], Plan: ['✓ Plan enviado', 'Marca el plan de ' + mesTxt(f.mes).toLowerCase() + ' como enviado.'], Otra: ['✓ Hecha', ''] }[f.tipo];
+  body.innerHTML = `
+    <div class="fld"><span>Tipo</span><div class="chips wrap" data-tk="tipo">${tipos.map((t) => `<button type="button" class="chip" data-v="${t}" aria-pressed="${f.tipo === t}">${ICONO_TIPO[t]} ${t}</button>`).join('')}</div></div>
+    <label class="fld"><span>Cliente${f.tipo === 'Otra' ? ' (opcional)' : ''}</span><select id="taCli" ${f.tipo === 'Seguimiento' ? 'disabled' : ''}><option value="">Elige un cliente…</option>${clis.map((c) => opt(c.id, c.nombre, c.id === f.cli)).join('')}</select></label>
+    ${conFinca ? `<label class="fld"><span>Finca${f.tipo === 'Visita' ? '' : ' (opcional)'}</span><select id="taFin" ${f.cli && f.tipo !== 'Seguimiento' ? '' : 'disabled'}><option value="">${f.cli ? (f.tipo === 'Visita' ? 'Elige una finca…' : 'Sin finca concreta') : 'Primero elige el cliente'}</option>${fincas.map((x) => opt(x.id, x.nombre, x.id === f.fin)).join('')}</select></label>` : ''}
+    ${f.tipo === 'Plan' ? `<div class="fld"><span>Plan del mes</span><div class="chips wrap" data-tk="mes">${[0, 1].map((n) => `<button type="button" class="chip" data-v="${mesMas(n)}" aria-pressed="${f.mes === mesMas(n)}">${mesTxt(mesMas(n))}</button>`).join('')}</div></div>${sinPlanes ? `<p class="hint warn">Este cliente no tiene planes en ${y}: al terminar solo se cerrará la tarea.</p>` : ''}` : ''}
+    <label class="fld"><span>Tarea${f.tipo === 'Otra' ? '' : ' (opcional)'}</span><input type="text" id="taTx" autocomplete="off" value="${esc(f.texto)}" placeholder="${esc(f.tipo === 'Otra' ? 'Ej. Llamar para el análisis de suelo' : textoTarea({ ...f, texto: '', finNom: (fincas.find((x) => x.id === f.fin) || {}).nombre }))}"></label>
+    <div class="fld"><span>Semana</span><div class="chips wrap" id="taSem">${SEMANAS.map(([txt, n]) => `<button type="button" class="chip" data-n="${n}" aria-pressed="${f.limite === AL.domingoEn(h, n)}">${txt}</button>`).join('')}<button type="button" class="chip" data-n="x" aria-pressed="${otra}">Otra fecha</button></div></div>
+    <label class="fld"><span>Fecha límite${f.limite ? ' · ' + esc(semanaTxt(f)) : ''}</span><input type="date" id="taLi" value="${esc(f.limite)}"></label>
+    <div class="fld"><span>Prioridad</span><div class="chips" data-tk="prioridad">${AL.PRIORIDADES.map((p) => `<button type="button" class="chip prio-${p.toLowerCase()}" data-v="${p}" aria-pressed="${f.prioridad === p}">${p}</button>`).join('')}</div></div>
+    <div class="actions${nueva ? '' : ' two'}">${nueva ? '' : '<button class="btn danger" id="taDel">Borrar</button>'}<button class="btn${nueva ? ' primary' : ''}" id="taG">Guardar</button></div>
+    ${nueva ? '' : `<div class="actions"><button class="btn primary" id="taFin2">${fin[0]}</button></div>${fin[1] ? `<p class="small">${esc(fin[1])}</p>` : ''}`}`;
+  $$('[data-tk]', body).forEach((g) => { g.onclick = (e) => { const b = e.target.closest('[data-v]'); if (!b) return; ftar[g.dataset.tk] = b.dataset.v; if (g.dataset.tk === 'tipo' && ftar.tipo === 'Plan') ftar.fin = ''; redrawSheet(); }; });
+  $('#taCli', body).onchange = (e) => { ftar.cli = e.target.value; ftar.fin = ''; redrawSheet(); };
+  const fs = $('#taFin', body); if (fs) fs.onchange = (e) => { ftar.fin = e.target.value; };
+  $('#taTx', body).oninput = (e) => { ftar.texto = e.target.value; };
+  $('#taLi', body).onchange = (e) => { ftar.limite = e.target.value; redrawSheet(); };
+  $('#taSem', body).onclick = (e) => {
+    const b = e.target.closest('[data-n]'); if (!b) return;
+    if (b.dataset.n === 'x') { const i = $('#taLi', body); i.focus(); try { i.showPicker(); } catch (_) { /* nada */ } return; }
+    ftar.limite = AL.domingoEn(hoy(), Number(b.dataset.n)); redrawSheet();
+  };
+  $('#taG', body).onclick = () => { if (guardarTarea()) { closeSheet(); toast(nueva ? 'Tarea apuntada' : 'Tarea actualizada'); } };
+  if (!nueva) {
+    armDelete($('#taDel', body), () => { if (commit((s) => { s.tareas = s.tareas.filter((x) => x.id !== ftar.id); })) { closeSheet(); toast('Tarea borrada'); } });
+    $('#taFin2', body).onclick = terminarDesdeForm;
+  }
+}
+/* Valida y guarda. Devuelve la tarea guardada o null. */
+function guardarTarea() {
+  const f = ftar;
+  if (f.tipo !== 'Otra' && !f.cli) { toast('Elige el cliente', true); return null; }
+  if (f.tipo === 'Visita' && !f.fin) { toast('Elige la finca que hay que visitar', true); return null; }
+  if (f.tipo === 'Otra' && !f.texto.trim()) { toast('Escribe la tarea', true); return null; }
+  if (f.tipo === 'Visita' && state.tareas.some((t) => t.tipo === 'Visita' && t.fin === f.fin && t.id !== f.id)) { toast('Esa finca ya tiene una visita planificada', true); return null; }
+  const fo = f.fin ? AL.finca(state, IX, f.fin) : null;
+  const datos = { tipo: f.tipo, cli: f.cli || null, fin: f.tipo === 'Plan' ? null : (f.fin || null), finNom: f.tipo === 'Plan' ? '' : (fo ? fo.nombre : (f.fin ? f.finNom || '' : '')), texto: f.texto.trim(), limite: f.limite || '', prioridad: f.prioridad, vis: f.vis || null, mes: f.tipo === 'Plan' ? f.mes : null };
+  let g = null;
+  const ok = commit((s) => {
+    if (!f.id) { g = { id: uid('ta'), ...datos, creada: hoy(), ts: Date.now() }; s.tareas.push(g); }
+    else { const t = s.tareas.find((x) => x.id === f.id); if (!t) throw new Error('La tarea ya no existe'); Object.assign(t, datos); g = t; }
+  });
+  return ok ? structuredClone(g) : null;
+}
+function terminarDesdeForm() {
+  const t = guardarTarea(); if (!t) return;
+  if (t.tipo === 'Visita') { reopen(() => abrirVisitaForm({ cli: t.cli, fin: t.fin })); return; }
+  if (t.tipo === 'Tratamiento') { reopen(() => { abrirTratForm({ cli: t.cli, fin: t.fin || '' }); tareaTrat = t.id; }); return; }
+  const ok = commit((s) => {
+    if (t.tipo === 'Seguimiento') { const v = s.visitas.find((x) => x.id === t.vis); if (v) v.hecho = true; else AL.terminarTarea(s, t.id, hoy()); }
+    else if (t.tipo === 'Plan') { const { y, m } = AL.mesDe(t.mes); const r = (s.años[y] || {})[t.cli]; if (r && r.planes > 0) r.env[m] = 'E'; else AL.terminarTarea(s, t.id, hoy()); }
+    else AL.terminarTarea(s, t.id, hoy());
+  });
+  if (ok) { closeSheet(); toast(t.tipo === 'Plan' ? 'Plan marcado como enviado · tarea hecha' : 'Tarea hecha'); }
 }
 
 /* ---------- Ficha de cliente ---------- */
@@ -1060,7 +1231,9 @@ async function abrirVisita(id) {
 /* ---------- Formulario de tratamiento ---------- */
 let ft = null;
 const prodVacio = () => ({ nombre: '', tipo: 'otro', dv: '', du: 'L' });
+let tareaTrat = null; // tarea de Organización que se cierra al guardar este tratamiento
 function abrirTratForm({ cli = '', fin = '', cultivo = '', problema = '', base = null, editar = false } = {}) {
+  tareaTrat = null;
   ft = { id: null, fecha: hoy(), cli, cliNuevo: '', fin: fin || '', finTxt: '', cultivo, problema, plazo: '', prods: [prodVacio()], cond: '', obs: '' };
   if (base) {
     ft = { ...ft, finNomPrev: base.finNom || '', cli: base.cli || ft.cli, fin: base.fin || (base.finNom ? '__otra' : ''), finTxt: base.fin ? '' : (base.finNom || ''), cultivo: base.cultivo || '', problema: base.problema || '',
@@ -1192,7 +1365,9 @@ function guardarTrat() {
     const t = { id, fecha: ft.fecha || hoy(), cli, fin: f ? f.id : null, finNom: f ? f.nombre : finNom, cultivo: ft.cultivo.trim(), problema: ft.problema.trim(), plazo: ft.plazo.trim(), prods, cond: ft.cond.trim(), obs: ft.obs.trim(), ts: Date.now() };
     const i = s.trat.findIndex((x) => x.id === id);
     if (i > -1) { t.ts = s.trat[i].ts; t.origen = s.trat[i].origen; s.trat[i] = t; } else s.trat.push(t);
+    if (tareaTrat && i < 0) AL.terminarTarea(s, tareaTrat, t.fecha || hoy());
   });
+  tareaTrat = null;
   if (!ok) return;
   const editado = !!ft.id;
   ft = null; refreshMx({});
@@ -1488,6 +1663,7 @@ function drawMx(box) {
 function drawSync(box) {
   if (syncOn()) {
     box.innerHTML = `<p class="small" id="syncLine">${esc(syncStatusText())}</p>
+      <p class="small" id="calLine">${esc(calStatusText())}</p>
       <p class="small">Tus aparatos (móvil, tablet y ordenador) comparten los datos a través de la hoja «Asesor»: cada cambio se envía solo y cada pocos minutos se recogen los de los otros aparatos. Si cambias lo mismo en dos sitios, se queda el cambio más reciente. Sin conexión todo sigue funcionando y se junta al volver. Las fotos van a la carpeta «Fotos de visitas», junto a la hoja.</p>
       <div class="actions"><button class="btn primary" id="syNow">Juntar ahora</button><button class="btn" id="syRes">Volver a la copia de la hoja…</button><button class="btn danger" id="syOff">Desconectar este aparato</button></div>`;
     $('#syNow', box).onclick = () => { if (!navigator.onLine) return toast('Sin conexión: se juntará al volver', true); sync.lastError = ''; clearTimeout(syncTimer); runSync(); };
@@ -1645,6 +1821,7 @@ async function init() {
   $('#fab').onclick = () => {
     if (ui.tab === 'visitas') abrirVisitaForm();
     else if (ui.tab === 'trat') abrirTratForm();
+    else if (ui.tab === 'org') abrirTareaForm(null, { cli: ui.oCli !== 'todos' ? ui.oCli : '', tipo: ui.oTipo !== 'Todos' && ui.oTipo !== 'Seguimiento' ? ui.oTipo : 'Visita' });
     else if (ui.cSeg === 'fichas') abrirNuevoCliente();
     else abrirAnadirAnio();
   };

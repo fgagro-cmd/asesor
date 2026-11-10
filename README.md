@@ -4,6 +4,7 @@ App para el móvil, la tablet y el ordenador que une **Visitas**, el **Generador
 
 - **Visitas**: fincas que toca visitar, seguimientos pendientes, nueva visita con plagas por nivel, estado fenológico, acción pendiente y fotos.
 - **Tratamientos**: recomendación con orden de mezcla, plantillas, imagen para WhatsApp, historial y Excel.
+- **Organización** (desde la 1.4.0): tareas de clientes por semana (visitas, seguimientos, tratamientos, planes y otras), con prioridad, filtros y calendario «Asesor» de Google.
 - **Clientes**: ficha de cada cliente (última visita, fincas que tocan, visitas, tratamientos, planes y cobros), planes de abonado enviados por mes y cobros.
 
 Clientes, fincas y cultivos salen de los **maestros** (Drive › Apps › Maestros). Cada aparato guarda sus datos y funciona sin conexión. Desde la **1.2.0** la hoja **«Asesor»** (Drive › Apps › Asesor) es la copia común de todos tus aparatos: cada cambio se envía solo, cada 3 minutos (y al abrir la app) se recogen los cambios de los otros aparatos, y si un mismo dato se cambia en dos sitios se queda el cambio más reciente. Los borrados también pasan de un aparato a otro. Las fotos se suben a la carpeta «Fotos de visitas» junto a esa hoja.
@@ -64,3 +65,29 @@ Al cambiar cualquier archivo, sube `VERSION` en `sw.js` (y `APP_VERSION` en `app
 4. Después la tablet y el ordenador (apartado 4).
 
 Si un aparato se queda con la versión antigua, la hoja ya no le deja subir nada («Actualiza Asesor a la versión 1.2.0»), para que no pise lo de los demás.
+
+
+## Organización (1.4.0)
+Tareas de clientes para organizar la semana. La fecha límite es el **domingo** de la semana (semanas de lunes a domingo): botones «Esta semana», «La que viene», «En 2 semanas» u «Otra fecha».
+
+- **Tipos**: 📍 Visita · 🔁 Seguimiento · 🧪 Tratamiento · 📄 Plan · 📝 Otra. Prioridad Alta, Media o Baja.
+- **Cómo se crean**: en Visitas › Toca visitar, cada finca tiene «Esta semana» / «La que viene» (un toque); en Seguimientos, botón «Planificar»; y con «Nueva tarea» en la pestaña Organización.
+- **Lista** agrupada en Vencidas, Esta semana, La semana que viene, Dentro de 2 semanas, Más adelante y Sin fecha; dentro, por prioridad. Filtros por cliente, tipo, semana y prioridad.
+- **Cómo se cierran**:
+  - Visita: sola, al guardar una visita a esa finca (entres por donde entres).
+  - Seguimiento: «✓ Hecho» (marca hecha la acción pendiente de la visita; si la marcas en Seguimientos también se cierra).
+  - Tratamiento: «Hacer tratamiento» abre el formulario con cliente y finca; se cierra al guardarlo.
+  - Plan: «✓ Plan enviado» marca el plan del mes como enviado (si lo marcas en Clientes › Planes, o llega de Planes de abonado, también se cierra).
+  - Otra: «✓ Hecha».
+- Las terminadas desaparecen de la lista y quedan en la pestaña **«Tareas hechas»** de la hoja (semana prevista, día real y si fue en plazo), para la Vista única. Las pendientes están en la pestaña **«Tareas»**.
+
+### Calendario
+Las tareas con semana se copian al calendario de Google **«Asesor»**: un evento de todo el día en su domingo, con aviso la víspera a las 8:00. Título: prioridad (🔴 🟠 🟢) + tipo + tarea + cliente. Manda la app: lo que cambies a mano en Calendar se rehace en el siguiente envío; al terminar o borrar la tarea, el evento desaparece.
+
+Para activarlo (una vez, en el script de la hoja «Asesor»):
+1. Extensiones → Apps Script → copia tu línea `const CLAVE = '…'`, borra todo, pega el nuevo `google-sheets/Codigo.gs` y vuelve a poner tu clave → Guardar.
+2. En el desplegable de funciones elige **autorizarCalendario** → Ejecutar → acepta los permisos (crea el calendario «Asesor»).
+3. Implementar → Gestionar implementaciones → lápiz ✏ → Versión: **Nueva versión** → Implementar.
+4. En la app: ⚙ → Tus aparatos → «Juntar ahora». Debe poner «📅 Calendario «Asesor» al día».
+
+Desde este script, los aparatos con Asesor anterior a la 1.4.0 no pueden subir la copia (no conocen las tareas): basta con cerrarlos y abrirlos con conexión para que se actualicen.

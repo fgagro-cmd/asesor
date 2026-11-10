@@ -8,6 +8,8 @@
  *   Tratamientos  -> una fila por producto de cada recomendación, en orden de mezcla
  *   Planes        -> planes de abonado enviados por cliente y mes (todos los años)
  *   Cobros        -> cobros por cliente y mes (todos los años)
+ *   Tareas        -> tareas pendientes de Organización (desde 1.4.0), por semana
+ *   Tareas hechas -> registro de tareas terminadas: semana prevista, día real y si fue en plazo (para la Vista única)
  *   _copia        -> copia completa para poder restaurar la app (oculta; no tocar)
  * Las fotos de las visitas se guardan en la carpeta «Fotos de visitas», junto a esta hoja, con una subcarpeta por cliente.
  *
@@ -17,11 +19,20 @@
  * Desde Asesor 1.2.0 la copia (_copia) es la copia común de todos tus aparatos (móvil, tablet y ordenador):
  * cada aparato la baja («bajar»), la junta con lo suyo y la sube («subir») solo si nadie la ha cambiado
  * entretanto (número de revisión). Si alguien la cambió, le devuelve la nueva para que vuelva a juntar.
+ *
+ * Desde Asesor 1.4.0 las tareas de Organización con semana se copian al calendario de Google «Asesor»
+ * (un evento de todo el día en el domingo de la semana, con aviso la víspera a las 8:00). Manda la app:
+ * lo que se cambie a mano en Calendar se rehace en el siguiente envío. Permiso: ejecuta «autorizarCalendario».
  */
 
 const CLAVE = 'CAMBIA-ESTA-CLAVE'; // debe ser idéntica a la que escribes en la app (⚙ Ajustes → Copia a la hoja «Asesor»)
 
-const PERMITIDAS = ['Clientes', 'Visitas', 'Tratamientos', 'Planes', 'Cobros'];
+const PERMITIDAS = ['Clientes', 'Visitas', 'Tratamientos', 'Planes', 'Cobros', 'Tareas', 'Tareas hechas'];
+const VERSION_MINIMA = '1.4.0'; // las versiones anteriores no conocen las tareas y no deben subir la copia
+const CAL_NOMBRE = 'Asesor';
+const CAL_AVISO_MIN = 960; // 16 h antes de las 00:00 del domingo = el sábado a las 8:00
+const PRIO_ICONO = { Alta: '🔴', Media: '🟠', Baja: '🟢' };
+const TIPO_ICONO = { Visita: '📍', Seguimiento: '🔁', Tratamiento: '🧪', Plan: '📄', Otra: '📝' };
 const COPIA = '_copia';
 const CARPETA_FOTOS = 'Fotos de visitas';
 const COLOR = '#1f5f3b';
@@ -108,7 +119,14 @@ function bajar() {
   return { ok: true, estado: e.estado, rev: revision(), fecha: e.fecha };
 }
 
+function versionMenor(a, b) {
+  const x = String(a || '0').split('.').map(Number), y = String(b).split('.').map(Number);
+  for (let i = 0; i < 3; i++) { if ((x[i] || 0) < (y[i] || 0)) return true; if ((x[i] || 0) > (y[i] || 0)) return false; }
+  return false;
+}
+
 function subir(req) {
+  if (versionMenor(req.version, VERSION_MINIMA)) return { ok: false, error: 'Actualiza Asesor a la versión ' + VERSION_MINIMA + ': cierra la app y vuelve a abrirla con conexión' };
   const rev = revision();
   if (Number(req.base) !== rev) {
     // Otro aparato ha subido entretanto: se le devuelve la copia nueva para que vuelva a juntar
@@ -119,7 +137,85 @@ function subir(req) {
   escribirTablas(req.tablas);
   const fecha = new Date().toISOString();
   guardarCopia(String(req.estado), fecha, rev + 1);
-  return { ok: true, rev: rev + 1, fecha: fecha };
+  const res = { ok: true, rev: rev + 1, fecha: fecha };
+  // El calendario va el último y aparte: si falla (por ejemplo, falta el permiso), la hoja ya está guardada
+  if (Array.isArray(req.cal)) {
+    try { res.calendario = sincronizarCalendario(req.cal); }
+    catch (err) { res.calendario = { ok: false, error: String((err && err.message) || err) }; }
+  }
+  return res;
+}
+
+/* ---------- Calendario «Asesor» ---------- */
+function calendarioAsesor() {
+  const propios = CalendarApp.getCalendarsByName(CAL_NOMBRE).filter(function (c) { return c.isOwnedByMe(); });
+  if (propios.length) return propios[0];
+  return CalendarApp.createCalendar(CAL_NOMBRE, { timeZone: Session.getScriptTimeZone(), summary: 'Tareas de clientes de la app Asesor (las escribe la app; no edites aquí)' });
+}
+
+function textoEvento(t) {
+  const l = [];
+  l.push('Tipo: ' + t.tipo);
+  if (t.cliente) l.push('Cliente: ' + t.cliente);
+  if (t.finca) l.push('Finca: ' + t.finca);
+  l.push('Prioridad: ' + t.prioridad);
+  l.push('Semana hasta el domingo (fecha límite)');
+  l.push('');
+  l.push('Escrito por Asesor. No lo cambies aquí: manda la app.');
+  l.push('[as:' + t.id + ']');
+  return l.join('\n');
+}
+
+function tituloEvento(t) {
+  const txt = t.texto || (t.tipo === 'Visita' ? 'Visitar ' + (t.finca || 'finca') : t.tipo === 'Plan' ? 'Plan de abonado' : t.tipo === 'Tratamiento' ? 'Tratamiento' : t.tipo);
+  return (PRIO_ICONO[t.prioridad] || '') + ' ' + (TIPO_ICONO[t.tipo] || '') + ' ' + txt + (t.cliente ? ' · ' + t.cliente : '');
+}
+
+function sincronizarCalendario(tareas) {
+  const cal = calendarioAsesor();
+  const zona = Session.getScriptTimeZone();
+  const ahora = Date.now();
+  const existentes = {};
+  cal.getEvents(new Date(ahora - 730 * 864e5), new Date(ahora + 730 * 864e5)).forEach(function (ev) {
+    const m = /\[as:([^\]]+)\]/.exec(ev.getDescription() || '');
+    if (m) (existentes[m[1]] = existentes[m[1]] || []).push(ev);
+  });
+  const quiero = {};
+  let creados = 0, cambiados = 0, borrados = 0;
+  const crear = function (titulo, dia, desc) {
+    const ev = cal.createAllDayEvent(titulo, dia, { description: desc });
+    ev.removeAllReminders();
+    ev.addPopupReminder(CAL_AVISO_MIN);
+  };
+  tareas.forEach(function (t) {
+    if (!t || !t.id || !t.limite) return;
+    quiero[t.id] = true;
+    const titulo = tituloEvento(t), desc = textoEvento(t);
+    const dia = Utilities.parseDate(String(t.limite), zona, 'yyyy-MM-dd');
+    const evs = existentes[t.id] || [];
+    evs.slice(1).forEach(function (x) { x.deleteEvent(); borrados++; });
+    if (!evs.length) { crear(titulo, dia, desc); creados++; return; }
+    const ev = evs[0];
+    let tocado = false;
+    if (ev.getTitle() !== titulo) { ev.setTitle(titulo); tocado = true; }
+    if (ev.getDescription() !== desc) { ev.setDescription(desc); tocado = true; }
+    const mismoDia = ev.isAllDayEvent() && Utilities.formatDate(ev.getAllDayStartDate(), zona, 'yyyy-MM-dd') === t.limite;
+    if (!mismoDia) {
+      if (ev.isAllDayEvent()) ev.setAllDayDate(dia); else { ev.deleteEvent(); crear(titulo, dia, desc); }
+      tocado = true;
+    }
+    if (tocado) cambiados++;
+  });
+  Object.keys(existentes).forEach(function (id) {
+    if (!quiero[id]) existentes[id].forEach(function (ev) { ev.deleteEvent(); borrados++; });
+  });
+  return { ok: true, eventos: Object.keys(quiero).length, creados: creados, cambiados: cambiados, borrados: borrados };
+}
+
+/* Ejecútala una vez desde el editor (▶) para dar el permiso de Calendar y crear el calendario «Asesor». */
+function autorizarCalendario() {
+  const c = calendarioAsesor();
+  Logger.log('Calendario listo: ' + c.getName());
 }
 
 function escribirTablas(lista) {
