@@ -465,3 +465,19 @@ textarea.inp { height: auto; min-height: 76px; padding: 10px 12px; resize: verti
 .pill.plan { border: 0; background: var(--brand-soft); color: var(--brand); font-size: 13px; padding: 4px 10px; font-weight: 600; margin: 0; }
 .pill.plan.venc { background: var(--alta-soft); color: var(--alta); }
 .mini .paid + .paid { margin-left: -4px; }
+
+/* ---------- Aviso de copia de seguridad (desde 1.4.1) ---------- */
+#avisoCopiaBox { padding: 12px 12px 0; }
+#avisoCopiaBox:empty { display: none; }
+.aviso-copia { background: var(--warn-soft); border-radius: 14px; padding: 12px 14px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 14px; }
+.aviso-copia-txt { display: grid; gap: 2px; flex: 1 1 220px; min-width: 0; }
+.aviso-copia-txt b { font-weight: 600; }
+.aviso-copia-txt span { font-size: 13px; color: var(--muted); }
+.aviso-copia-btns { display: flex; gap: 8px; flex: 0 0 auto; }
+.aviso-copia-btns .btn { height: 40px; font-size: 14px; border-radius: 12px; padding: 0 14px; }
+@media (min-width: 760px) {
+  #avisoCopiaBox { max-width: calc(1180px + 48px); margin: 0 auto; padding: 18px 24px 0; }
+}
+@media (min-width: 1500px) {
+  #avisoCopiaBox { max-width: calc(1400px + 48px); }
+}

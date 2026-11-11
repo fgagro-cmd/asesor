@@ -4,7 +4,7 @@
    sin conexión; clientes, fincas y cultivos salen de los maestros de Drive. Desde la 1.2.0 la hoja «Asesor» es la
    copia común de todos los aparatos (móvil, tablet y ordenador): cada uno la baja, la junta con lo suyo y la sube. */
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.4.1';
 
 /* ---------- Utilidades ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -440,6 +440,58 @@ const ui = { tab: 'visitas', oCli: 'todos', oTipo: 'Todos', oPrio: 'Todas', oSem
 const nomCli = (id) => { const c = AL.cliente(state, id); return c ? c.nombre : '(sin cliente)'; };
 const fincasEst = () => AL.fincasEstado(state, IX, hoy());
 
+/* Copia de seguridad en archivo (Ajustes y aviso de 15 días). En móvil y tablet se comparte (Drive), en el ordenador se descarga. */
+async function guardarCopiaArchivo() {
+  const nombre = 'copia-asesor-' + hoy() + '.json';
+  const texto = JSON.stringify({ app: 'asesor', version: APP_VERSION, fecha: new Date().toISOString(), estado: state });
+  const blob = new Blob([texto], { type: 'application/json' });
+  let compartida = false;
+  try {
+    const file = new File([texto], nombre, { type: 'application/json' });
+    const tactil = window.matchMedia && matchMedia('(pointer: coarse)').matches;
+    if (tactil && navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: 'Copia Asesor' }); compartida = true; }
+    else descargar(nombre, blob);
+  } catch (e) {
+    if (e && e.name === 'AbortError') return false;
+    descargar(nombre, blob);
+  }
+  commit((s) => { s.ajustes.ultimaCopia = new Date().toISOString(); }, { render: false });
+  toast(compartida ? 'Copia guardada' : 'Copia descargada: guárdala en Drive › Apps › Copia de seguridad');
+  return true;
+}
+
+/* ---------- Aviso de copia de seguridad (desde 1.4.1) ----------
+   Si la última copia en fichero tiene 15 días o más (o no hay ninguna), sale un aviso arriba con «Guardar copia».
+   «Mañana» lo aparca hasta el día siguiente en este aparato. Va fuera de #view para que no se borre al repintar una pestaña. */
+const COPIA_DIAS = 15, COPIA_POSPONER = 'asesor-avisoCopia';
+function diasDesdeCopia() {
+  const f = (state.ajustes || {}).ultimaCopia;
+  if (!f) return null;
+  const t = new Date(f).getTime();
+  return isNaN(t) ? null : Math.max(0, Math.floor((Date.now() - t) / 864e5));
+}
+function pintarAvisoCopia() {
+  const box = document.getElementById('avisoCopiaBox');
+  if (!box) return;
+  let ver = false, d = null;
+  try {
+    if (state && !(AL.virgen(state))) {
+      d = diasDesdeCopia();
+      let hasta = 0; try { hasta = Number(localStorage.getItem(COPIA_POSPONER)) || 0; } catch (_) {}
+      ver = (d === null || d >= COPIA_DIAS) && Date.now() >= hasta;
+    }
+  } catch (_) { ver = false; }
+  if (!ver) { box.innerHTML = ''; return; }
+  const txt = d === null ? 'Aún no has guardado ninguna copia de seguridad en fichero.' : `Tu última copia de seguridad es de hace ${d} días.`;
+  box.innerHTML = `<div class="aviso-copia" role="status"><div class="aviso-copia-txt"><b>🛟 ${txt}</b><span>Guárdala en Drive › Apps › Copia de seguridad.</span></div><div class="aviso-copia-btns"><button class="btn primary" id="acGuardar">Guardar copia</button><button class="btn" id="acLuego">Mañana</button></div></div>`;
+  document.getElementById('acGuardar').onclick = async () => { await guardarCopiaArchivo(); pintarAvisoCopia(); };
+  document.getElementById('acLuego').onclick = () => {
+    const m = new Date(); m.setHours(24, 0, 0, 0);
+    try { localStorage.setItem(COPIA_POSPONER, String(m.getTime())); } catch (_) {}
+    pintarAvisoCopia();
+  };
+}
+
 function renderAll() {
   $$('.tab').forEach((b) => b.setAttribute('aria-current', b.dataset.tab === ui.tab ? 'page' : 'false'));
   const head = $('#head'), view = $('#view'), fab = $('#fab');
@@ -458,6 +510,7 @@ function renderAll() {
   const nOrg = state.tareas.filter((t) => AL.grupoSemana(t, hoy()) <= 0 && t.limite).length, nVenc = state.tareas.filter((t) => AL.vencida(t, hoy())).length;
   const bo = $('#badgeOrg'); bo.textContent = nOrg || ''; bo.hidden = !nOrg; bo.classList.toggle('warn', !nVenc);
   $('#topSub').textContent = state.clientes.length ? plural(AL.delAsesor(state).length, 'cliente', 'clientes') + ' · ' + plural(nToca, 'finca toca visitar', 'fincas tocan visitar') : '';
+  pintarAvisoCopia();
 }
 const kpi = (label, val, cls = '') => `<div class="k ${cls}"><span>${esc(label)}</span><strong>${val}</strong></div>`;
 
@@ -1613,12 +1666,7 @@ function abrirAjustes() {
       });
       toast('Guardado'); redrawSheet();
     };
-    $('#ajExp', body).onclick = () => {
-      const copia = { app: 'asesor', version: APP_VERSION, fecha: new Date().toISOString(), estado: state };
-      descargar('copia-asesor-' + hoy() + '.json', new Blob([JSON.stringify(copia)], { type: 'application/json' }));
-      commit((s) => { s.ajustes.ultimaCopia = new Date().toISOString(); }, { render: false });
-      toast('Copia descargada: guárdala en Drive › Apps › Copia de seguridad'); redrawSheet();
-    };
+    $('#ajExp', body).onclick = async () => { if (await guardarCopiaArchivo()) redrawSheet(); };
     $('#ajRes', body).onchange = (e) => {
       const f = e.target.files[0]; if (!f) return;
       const rd = new FileReader();
