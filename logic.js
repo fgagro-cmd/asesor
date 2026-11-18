@@ -123,6 +123,7 @@
       v: 1, clientes: [], fincasNuevas: [], cultivosExtra: {}, visitas: [], trat: [], plantillas: [], productos: [],
       plagas: [], fenologias: [], cultivos: ['Limonero', 'Naranjo', 'Pomelo', 'Mandarino', 'Almendro', 'Albaricoquero', 'Melocotonero', 'Nectarino', 'Paraguayo', 'Olivo', 'Otro'],
       años: {}, ajustes: { marca: 'FG Agro', dias: { ...DIAS_DEFECTO } }, mxPend: [], importes: {}, tareas: [], hechas: [],
+      puntuales: [], finPunt: {},
     };
   }
   function migrar(s) {
@@ -131,8 +132,8 @@
     const st = { ...b, ...s };
     st.ajustes = { ...b.ajustes, ...(s.ajustes || {}) };
     st.ajustes.dias = { ...DIAS_DEFECTO, ...((s.ajustes || {}).dias || {}) };
-    for (const k of ['clientes', 'fincasNuevas', 'visitas', 'trat', 'plantillas', 'productos', 'plagas', 'fenologias', 'cultivos', 'mxPend', 'tareas', 'hechas']) if (!Array.isArray(st[k])) st[k] = b[k];
-    for (const k of ['cultivosExtra', 'años', 'importes']) if (!st[k] || typeof st[k] !== 'object') st[k] = {};
+    for (const k of ['clientes', 'fincasNuevas', 'visitas', 'trat', 'plantillas', 'productos', 'plagas', 'fenologias', 'cultivos', 'mxPend', 'tareas', 'hechas', 'puntuales']) if (!Array.isArray(st[k])) st[k] = b[k];
+    for (const k of ['cultivosExtra', 'años', 'importes', 'finPunt']) if (!st[k] || typeof st[k] !== 'object') st[k] = {};
     st.v = 1;
     return st;
   }
@@ -161,7 +162,12 @@
   /* ---------- clientes y fincas ---------- */
   const cliente = (st, id) => st.clientes.find((c) => c.id === id) || null;
   const delAsesor = (st) => st.clientes.filter((c) => c.ases).sort(cmpNombre);
-  const esAsesoria = (m) => (m.servicios || []).some((s) => norm(s).startsWith('asesor'));
+  // «Asesoría puntual» en el maestro no hace entrar al cliente como cliente de asesoramiento mensual (1.5.0)
+  const esAsesoria = (m) => (m.servicios || []).some((s) => norm(s).startsWith('asesor') && !norm(s).includes('puntual'));
+  /* Clientes solo de trabajos puntuales (sin asesoramiento mensual): no salen en «Toca visitar» ni en la pestaña Clientes de la hoja */
+  const soloPuntuales = (st) => st.clientes.filter((c) => c.punt && !c.ases).sort(cmpNombre);
+  /* Finca marcada como puntual en un cliente con cuota: no cuenta para visitar */
+  const fincaPuntual = (st, finId) => !!(st.finPunt && st.finPunt[finId]);
 
   /* Fincas de un cliente: las del maestro (con los cultivos añadidos aquí) y las nuevas pendientes de alta. */
   function fincasDe(st, ix, cliId) {
@@ -200,7 +206,7 @@
     const out = [];
     for (const c of delAsesor(st)) {
       if (!activo(c, hoy)) continue;
-      for (const f of fincasDe(st, ix, c.id)) out.push({ f, c, e: estadoFinca(st, f.id, hoy) });
+      for (const f of fincasDe(st, ix, c.id)) if (!fincaPuntual(st, f.id)) out.push({ f, c, e: estadoFinca(st, f.id, hoy) });
     }
     out.sort((a, b) => (b.e.dias == null ? 1e9 : b.e.dias) - (a.e.dias == null ? 1e9 : a.e.dias) || a.c.nombre.localeCompare(b.c.nombre, 'es') || a.f.nombre.localeCompare(b.f.nombre, 'es'));
     return out;
@@ -208,6 +214,23 @@
   const seguimientos = (st, cliId) => st.visitas.filter((v) => v.accion && !v.hecho && (!cliId || v.cli === cliId))
     .sort((a, b) => (a.seg || a.fecha || '9999').localeCompare(b.seg || b.fecha || '9999') || (a.fecha || '').localeCompare(b.fecha || ''));
   const recientes = (xs) => xs.slice().sort((a, b) => (b.fecha || '').localeCompare(a.fecha || '') || (b.ts || 0) - (a.ts || 0));
+
+  /* ---------- Trabajos puntuales (desde 1.5.0) ----------
+     Trabajo: { id, fecha, cli, fin, finNom, tipo, texto, importe (€ sin IVA), cobrado, fCobro, ts }.
+     Cuentan como asesoría en el mes del trabajo: pendientes de cobro desde ese mes hasta marcarlos cobrados. */
+  const TIPOS_PUNTUAL = ['Visita e informe', 'Tratamientos', 'Analíticas', 'Otro'];
+  const ICONO_PUNTUAL = { 'Visita e informe': '📋', Tratamientos: '🧪', 'Analíticas': '🔬', Otro: '📝' };
+  const conceptoPuntual = (p) => ['Puntual', p.tipo || 'Otro', p.finNom || '', p.texto || ''].filter(Boolean).join(' · ');
+  function statsPuntuales(st, y, hoy) {
+    const mesHoy = String(hoy).slice(0, 7);
+    let n = 0, facturado = 0, cobrado = 0, pendiente = 0, nPend = 0;
+    for (const p of st.puntuales || []) {
+      const imp = Number(p.importe) || 0;
+      if (String(p.fecha || '').slice(0, 4) === String(y)) { n++; facturado += imp; if (p.cobrado) cobrado += imp; }
+      if (!p.cobrado && imp && String(p.fecha || '').slice(0, 7) <= mesHoy) { pendiente += imp; nPend++; }
+    }
+    return { n, facturado, cobrado, pendiente, nPend };
+  }
 
   /* ---------- Organización: tareas por semana (desde 1.4.0) ----------
      Tarea: { id, tipo, cli, fin, finNom, texto, limite (domingo de la semana), prioridad, vis (seguimiento), mes (plan, AAAA-MM), creada, ts }.
@@ -280,6 +303,8 @@
     st.visitas.forEach((v) => { if (v.cli === de) v.cli = a; });
     st.trat.forEach((t) => { if (t.cli === de) t.cli = a; });
     st.fincasNuevas.forEach((f) => { if (f.cli === de) f.cli = a; });
+    (st.puntuales || []).forEach((p) => { if (p.cli === de) p.cli = a; });
+    (st.tareas || []).forEach((t) => { if (t.cli === de) t.cli = a; });
     for (const y of Object.keys(st.años)) {
       const t = st.años[y];
       if (t[de] && !t[a]) t[a] = t[de];
@@ -287,6 +312,8 @@
     }
     if (!ca.alta || (cd.alta && cd.alta < ca.alta)) ca.alta = cd.alta || ca.alta;
     if (cd.ases) ca.ases = true;
+    if (cd.punt && !ca.ases) ca.punt = true;
+    if (ca.ases) ca.punt = false;
     st.mxPend = st.mxPend.filter((p) => !(p.tipo === 'cliente' && p.ref === de));
     st.clientes = st.clientes.filter((c) => c.id !== de);
   }
@@ -294,6 +321,8 @@
   function cambiarFinca(st, de, a, nombre) {
     st.visitas.forEach((v) => { if (v.fin === de) { v.fin = a; if (nombre) v.finNom = nombre; } });
     st.trat.forEach((t) => { if (t.fin === de) { t.fin = a; if (nombre) t.finNom = nombre; } });
+    (st.puntuales || []).forEach((p) => { if (p.fin === de) { p.fin = a; if (nombre) p.finNom = nombre; } });
+    if (st.finPunt && st.finPunt[de]) { st.finPunt[a] = true; delete st.finPunt[de]; }
     const nv = st.fincasNuevas.find((f) => f.id === de);
     if (nv) {
       st.cultivosExtra[a] = uniq([...(st.cultivosExtra[a] || []), ...(nv.cultivos || [])]);
@@ -344,7 +373,7 @@
       if (quedan.length) st.cultivosExtra[fid] = quedan; else delete st.cultivosExtra[fid];
     }
     // Nombres de finca guardados en visitas y tratamientos: los del maestro
-    for (const v of [...st.visitas, ...st.trat]) { const m = v.fin && ix.fin.get(v.fin); if (m && v.finNom !== m.nombre) v.finNom = m.nombre; }
+    for (const v of [...st.visitas, ...st.trat, ...(st.puntuales || [])]) { const m = v.fin && ix.fin.get(v.fin); if (m && v.finNom !== m.nombre) v.finNom = m.nombre; }
     // Productos del catálogo sin enlazar que se reconocen en el maestro
     for (const p of st.productos) if (!p.mid) { const m = MX.buscarProducto(ix, p.nombre); if (m) p.mid = m.p.id; }
     return r;
@@ -515,9 +544,9 @@
      El estado se ve como un conjunto de registros con clave (un cliente, una visita, un mes de planes y cobros
      de un cliente…). Cada registro lleva la hora de su último cambio (st.sello) y los borrados dejan su hora
      (st.borrados). Al juntar dos copias, en cada registro gana el cambio más reciente; si empatan, la de la hoja. */
-  const COLS = { clientes: ['cli', 'id'], fincasNuevas: ['fn', 'id'], visitas: ['vis', 'id'], trat: ['tr', 'id'], productos: ['pr', 'id'], mxPend: ['mp', 'k'], tareas: ['ta', 'id'], hechas: ['th', 'id'] };
+  const COLS = { clientes: ['cli', 'id'], fincasNuevas: ['fn', 'id'], visitas: ['vis', 'id'], trat: ['tr', 'id'], productos: ['pr', 'id'], mxPend: ['mp', 'k'], tareas: ['ta', 'id'], hechas: ['th', 'id'], puntuales: ['pu', 'id'] };
   const LISTAS = { plagas: ['pg', (x) => x && x.nombre], fenologias: ['fe', (x) => x && x.nombre], plantillas: ['pl', (x) => x && x.nombre], cultivos: ['cu', (x) => x] };
-  const CONOCIDAS = new Set(['v', 'sello', 'borrados', 'cultivosExtra', 'años', 'ajustes', 'importes', ...Object.keys(COLS), ...Object.keys(LISTAS)]);
+  const CONOCIDAS = new Set(['v', 'sello', 'borrados', 'cultivosExtra', 'finPunt', 'años', 'ajustes', 'importes', ...Object.keys(COLS), ...Object.keys(LISTAS)]);
   const J = (v) => JSON.stringify(v === undefined ? null : v);
   /* Estado → Map clave → valor en JSON (en orden estable) */
   function aplanar(st) {
@@ -530,6 +559,7 @@
       m.set('ord|' + lista, J(orden));
     }
     for (const [fid, cs] of Object.entries(st.cultivosExtra || {})) m.set('ce|' + fid, J(cs));
+    for (const [fid, on] of Object.entries(st.finPunt || {})) if (on) m.set('fp|' + fid, '1');
     for (const [y, t] of Object.entries(st.años || {})) {
       m.set('ay|' + y, '1');
       for (const [cid, r] of Object.entries(t || {})) {
@@ -548,7 +578,7 @@
   }
   /* Map clave → JSON → estado */
   function reconstruir(m) {
-    const st = { v: 1, clientes: [], fincasNuevas: [], cultivosExtra: {}, visitas: [], trat: [], plantillas: [], productos: [], plagas: [], fenologias: [], cultivos: [], años: {}, ajustes: { dias: {} }, mxPend: [], importes: {}, tareas: [], hechas: [] };
+    const st = { v: 1, clientes: [], fincasNuevas: [], cultivosExtra: {}, finPunt: {}, visitas: [], trat: [], plantillas: [], productos: [], plagas: [], fenologias: [], cultivos: [], años: {}, ajustes: { dias: {} }, mxPend: [], importes: {}, tareas: [], hechas: [], puntuales: [] };
     const porPre = {}; for (const [col, [pre]] of Object.entries(COLS)) porPre[pre] = col;
     const listas = {}; for (const [lista, [pre]] of Object.entries(LISTAS)) listas[pre] = { lista, items: new Map(), orden: [] };
     const filas = {};
@@ -558,6 +588,7 @@
       else if (listas[pre]) listas[pre].items.set(key, v);
       else if (pre === 'ord') { const L = Object.values(listas).find((x) => x.lista === resto); if (L) L.orden = Array.isArray(v) ? v : []; }
       else if (pre === 'ce') st.cultivosExtra[resto] = v;
+      else if (pre === 'fp') st.finPunt[resto] = true;
       else if (pre === 'ay') { if (!st.años[resto]) st.años[resto] = {}; }
       else if (pre === 'af' || pre === 'am') {
         const p = resto.split('|'), y = p[0], cid = p[1];
@@ -569,7 +600,7 @@
       else if (pre === 'ad') st.ajustes.dias[resto] = v;
       else if (pre === 'aj') st.ajustes[resto] = v;
       else if (pre === 'im') st.importes[resto] = v;
-      else if (pre === 'x') { if (!COLS[resto]) st[resto] = v; } // «tareas» y «hechas» sueltas de una versión antigua: no pisan los registros
+      else if (pre === 'x') { if (!COLS[resto] && resto !== 'finPunt') st[resto] = v; } // «tareas» y «hechas» sueltas de una versión antigua: no pisan los registros
     }
     for (const L of Object.values(listas)) {
       const vistos = new Set();
@@ -596,7 +627,7 @@
     return true;
   }
   /* Aparato sin datos propios (recién instalado) */
-  const virgen = (st) => !st || !((st.clientes || []).length || (st.visitas || []).length || (st.trat || []).length || (st.productos || []).length || (st.plantillas || []).length || Object.keys(st.años || {}).length);
+  const virgen = (st) => !st || !((st.clientes || []).length || (st.visitas || []).length || (st.trat || []).length || (st.puntuales || []).length || (st.productos || []).length || (st.plantillas || []).length || Object.keys(st.años || {}).length);
   /* Pone la hora t en los registros que han cambiado entre prev y next, y anota los borrados. Devuelve cuántos. */
   function sellar(prev, next, t) {
     const a = prev ? aplanar(prev) : new Map(), b = aplanar(next);
@@ -668,9 +699,15 @@
     for (const y of Object.keys(st.años).map(Number).sort((a, b) => b - a)) {
       for (const x of filas(st, y)) {
         pla.push([y, x.c.nombre, x.c.mid || '', x.r.planes, ...x.r.env.map((e) => ESTADO_TXT[e] || '')]);
-        for (let i = 0; i < 12; i++) cob.push([y, x.c.nombre, x.c.mid || '', MC[i], Number(x.r.imp[i]) || 0, x.r.cob[i] ? 'Sí' : 'No', x.r.precio]);
+        for (let i = 0; i < 12; i++) cob.push([y, x.c.nombre, x.c.mid || '', MC[i], Number(x.r.imp[i]) || 0, x.r.cob[i] ? 'Sí' : 'No', x.r.precio, 'Cuota']);
       }
     }
+    // Trabajos puntuales (1.5.0): una fila más en Cobros, en el mes del trabajo, para que cuenten como asesoría
+    const pun = recientes(st.puntuales || []);
+    const cobPun = pun.filter((p) => /^\d{4}-\d{2}/.test(p.fecha || '')).slice().sort((a, b) => b.fecha.localeCompare(a.fecha))
+      .map((p) => [Number(p.fecha.slice(0, 4)), nomCli(p.cli), midCli(p.cli), MC[Number(p.fecha.slice(5, 7)) - 1], Number(p.importe) || 0, p.cobrado ? 'Sí' : 'No', '', conceptoPuntual(p)]);
+    cob.push(...cobPun);
+    const pnt = pun.map((p) => [p.fecha || '', nomCli(p.cli), midCli(p.cli), p.finNom || '', p.fin && /^F\d+/.test(p.fin) ? p.fin : '', p.tipo || '', p.texto || '', Number(p.importe) || 0, p.cobrado ? 'Sí' : 'No', p.cobrado ? p.fCobro || '' : '', p.id]);
     const y0 = Number(String(hoy).slice(0, 4));
     const cli = delAsesor(st).map((c) => {
       const fs = fincasDe(st, ix, c.id);
@@ -679,8 +716,10 @@
       const r = (st.años[y0] || {})[c.id];
       let cobrado = 0, pend = 0;
       if (r) for (let i = 0; i < 12; i++) { const imp = Number(r.imp[i]) || 0; if (r.cob[i]) cobrado += imp; else if (enRango(c, y0, i)) pend += imp; }
-      return [c.nombre, c.mid || '', fs.length, ests.filter((e) => e.toca).length, ult ? ult.fecha : '', ult ? ult.finNom : '',
-        st.trat.filter((t) => t.cli === c.id).length, r ? r.planes : '', r ? r.precio : '', cobrado, pend, c.alta || '', c.baja || ''];
+      const fp = fs.filter((f) => fincaPuntual(st, f.id));
+      return [c.nombre, c.mid || '', fs.length, fs.filter((f, i) => !fincaPuntual(st, f.id) && ests[i].toca).length, ult ? ult.fecha : '', ult ? ult.finNom : '',
+        st.trat.filter((t) => t.cli === c.id).length, r ? r.planes : '', r ? r.precio : '', cobrado, pend, c.alta || '', c.baja || '',
+        fp.map((f) => f.mid || '').filter(Boolean).join(' '), fp.map((f) => f.nombre).join(', ')];
     });
     const tar = ordenarTareas(st.tareas || [], hoy).map((t) => {
       const g = grupoSemana(t, hoy);
@@ -690,11 +729,12 @@
       t.hecha || '', t.limite || '', t.limite ? (t.hecha <= t.limite ? 'Sí' : 'No') : '', t.tipo, t.prioridad || '', nomCli(t.cli), midCli(t.cli), t.finNom || '', t.texto || '', t.creada || '', t.id]);
     const EUR = '#,##0.00', F = 'dd/mm/yyyy';
     return [
-      { nombre: 'Clientes', cabecera: ['Cliente', 'ID cliente', 'Fincas', 'Fincas que toca visitar', 'Última visita', 'Finca última visita', 'Tratamientos', 'Planes ' + y0, 'Precio/mes (€)', 'Cobrado ' + y0 + ' (€)', 'Pendiente ' + y0 + ' (€)', 'Primer mes', 'Baja (último mes)'], filas: cli, fechas: [4], formatos: [null, null, '0', '0', F, null, '0', '0', EUR, EUR, EUR, null, null] },
+      { nombre: 'Clientes', cabecera: ['Cliente', 'ID cliente', 'Fincas', 'Fincas que toca visitar', 'Última visita', 'Finca última visita', 'Tratamientos', 'Planes ' + y0, 'Precio/mes (€)', 'Cobrado ' + y0 + ' (€)', 'Pendiente ' + y0 + ' (€)', 'Primer mes', 'Baja (último mes)', 'Fincas puntuales (ID)', 'Fincas puntuales'], filas: cli, fechas: [4], formatos: [null, null, '0', '0', F, null, '0', '0', EUR, EUR, EUR, null, null, null, null] },
       { nombre: 'Visitas', cabecera: ['Fecha', 'Cliente', 'ID cliente', 'Finca', 'ID finca', 'Cultivo', 'Estado fenológico', 'Plagas y enfermedades', 'Observaciones', 'Acción pendiente', 'Seguimiento', 'Hecho', 'Fotos', 'ID visita'], filas: vis, fechas: [0, 10], formatos: [F, null, null, null, null, null, null, null, null, null, F, null, null, null] },
       { nombre: 'Tratamientos', cabecera: ['Fecha', 'Cliente', 'ID cliente', 'Finca', 'Cultivo', 'Problema', 'Plazo de seguridad', 'Nº mezcla', 'Producto', 'ID producto', 'Formulación', 'Dosis /1000 L', 'Unidad', 'Condiciones de aplicación', 'Observaciones', 'ID tratamiento'], filas: tra, fechas: [0], formatos: [F, null, null, null, null, null, null, '0', null, null, null, '#,##0.###', null, null, null, null] },
       { nombre: 'Planes', cabecera: ['Año', 'Cliente', 'ID cliente', 'Planes', ...MC], filas: pla, fechas: [], formatos: ['0', null, null, '0'] },
-      { nombre: 'Cobros', cabecera: ['Año', 'Cliente', 'ID cliente', 'Mes', 'Importe (€)', 'Cobrado', 'Precio/mes (€)'], filas: cob, fechas: [], formatos: ['0', null, null, null, EUR, null, EUR] },
+      { nombre: 'Cobros', cabecera: ['Año', 'Cliente', 'ID cliente', 'Mes', 'Importe (€)', 'Cobrado', 'Precio/mes (€)', 'Concepto'], filas: cob, fechas: [], formatos: ['0', null, null, null, EUR, null, EUR, null] },
+      { nombre: 'Trabajos puntuales', cabecera: ['Fecha', 'Cliente', 'ID cliente', 'Finca', 'ID finca', 'Tipo', 'Descripción', 'Importe (€)', 'Cobrado', 'Fecha de cobro', 'ID trabajo'], filas: pnt, fechas: [0, 9], formatos: [F, null, null, null, null, null, null, EUR, null, F, null] },
       { nombre: 'Tareas', cabecera: ['Semana (domingo)', 'Cuándo', 'Tipo', 'Prioridad', 'Cliente', 'ID cliente', 'Finca', 'Tarea', 'Mes del plan', 'Apuntada', 'ID tarea'], filas: tar, fechas: [0, 9], formatos: [F, null, null, null, null, null, null, null, null, F, null] },
       { nombre: 'Tareas hechas', cabecera: ['Hecha', 'Semana prevista (domingo)', 'En plazo', 'Tipo', 'Prioridad', 'Cliente', 'ID cliente', 'Finca', 'Tarea', 'Apuntada', 'ID tarea'], filas: hec, fechas: [0, 1, 9], formatos: [F, F, null, null, null, null, null, null, null, F, null] },
     ];
@@ -712,7 +752,7 @@
     MES, MC, ESTADOS, ESTADO_TXT, ym, enRango, filas, filasPlanes, statsPlanes, transcurridos, statsCobros, cambiarPrecio, nuevaFila, crearAnio,
     DIAS_DEFECTO, frecuencia, FORM_TYPES, UNIDADES, formInfo, unidad, ordenMezcla, dosisTxt, NIVELES, parsePlagas, textoPlagas,
     vacio, migrar, valido, uniq, limpiar, altaPlaga, altaFen, ordenPlagas,
-    cliente, delAsesor, esAsesoria, fincasDe, finca, ultimaVisita, estadoFinca, activo, fincasEstado, seguimientos, recientes,
+    cliente, delAsesor, esAsesoria, soloPuntuales, fincaPuntual, TIPOS_PUNTUAL, ICONO_PUNTUAL, conceptoPuntual, statsPuntuales, fincasDe, finca, ultimaVisita, estadoFinca, activo, fincasEstado, seguimientos, recientes,
     buscarFincaCli, choqueAnios, unirCliente, cambiarFinca, aplicarMaestros, asegurarCliente, asegurarFinca, asegurarProducto,
     importarVisitas, importarGenerador, importarClientes, detectarCopia, tablas,
     aplanar, reconstruir, prepararSellos, virgen, sellar, fusionar, huella,

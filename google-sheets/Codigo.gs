@@ -7,7 +7,9 @@
  *   Visitas       -> una fila por cultivo visitado (la más reciente arriba), con enlaces a las fotos
  *   Tratamientos  -> una fila por producto de cada recomendación, en orden de mezcla
  *   Planes        -> planes de abonado enviados por cliente y mes (todos los años)
- *   Cobros        -> cobros por cliente y mes (todos los años)
+ *   Cobros        -> cobros por cliente y mes (todos los años); desde 1.5.0 también los trabajos puntuales
+ *                    (columna «Concepto»: «Cuota» o «Puntual · tipo · finca · descripción»)
+ *   Trabajos puntuales -> trabajos sueltos con precio cerrado (desde 1.5.0): fecha, cliente, finca, tipo, importe y cobro
  *   Tareas        -> tareas pendientes de Organización (desde 1.4.0), por semana
  *   Tareas hechas -> registro de tareas terminadas: semana prevista, día real y si fue en plazo (para la Vista única)
  *   _copia        -> copia completa para poder restaurar la app (oculta; no tocar)
@@ -27,8 +29,8 @@
 
 const CLAVE = 'CAMBIA-ESTA-CLAVE'; // debe ser idéntica a la que escribes en la app (⚙ Ajustes → Copia a la hoja «Asesor»)
 
-const PERMITIDAS = ['Clientes', 'Visitas', 'Tratamientos', 'Planes', 'Cobros', 'Tareas', 'Tareas hechas'];
-const VERSION_MINIMA = '1.4.0'; // las versiones anteriores no conocen las tareas y no deben subir la copia
+const PERMITIDAS = ['Clientes', 'Visitas', 'Tratamientos', 'Planes', 'Cobros', 'Trabajos puntuales', 'Tareas', 'Tareas hechas'];
+const VERSION_MINIMA = '1.5.0'; // las versiones anteriores no conocen los trabajos puntuales ni las fincas puntuales y no deben subir la copia
 const CAL_NOMBRE = 'Asesor';
 const CAL_AVISO_MIN = 960; // 16 h antes de las 00:00 del domingo = el sábado a las 8:00
 const PRIO_ICONO = { Alta: '🔴', Media: '🟠', Baja: '🟢' };

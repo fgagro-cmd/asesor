@@ -481,3 +481,9 @@ textarea.inp { height: auto; min-height: 76px; padding: 10px 12px; resize: verti
 @media (min-width: 1500px) {
   #avisoCopiaBox { max-width: calc(1400px + 48px); }
 }
+
+/* Trabajos puntuales (1.5.0) */
+.pimp { flex: 0 0 auto; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tag.tag-punt { background: var(--chip); color: var(--muted); }
+.paid.off { background: var(--chip); color: var(--muted); }
+.paid.punt { background: var(--warn-soft); color: var(--warn); }

@@ -4,7 +4,7 @@
    sin conexión; clientes, fincas y cultivos salen de los maestros de Drive. Desde la 1.2.0 la hoja «Asesor» es la
    copia común de todos los aparatos (móvil, tablet y ordenador): cada uno la baja, la junta con lo suyo y la sube. */
 
-const APP_VERSION = '1.4.1';
+const APP_VERSION = '1.5.0';
 
 /* ---------- Utilidades ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -436,7 +436,7 @@ function calStatusText() {
 }
 
 /* ---------- Pestañas ---------- */
-const ui = { tab: 'visitas', oCli: 'todos', oTipo: 'Todos', oPrio: 'Todas', oSem: 'todas', vSeg: 'toca', vTodas: false, cSeg: 'fichas', year: HOYM().y, month: HOYM().m, cobFiltro: 'todos', qT: '', qC: '', qV: '' };
+const ui = { tab: 'visitas', oCli: 'todos', oTipo: 'Todos', oPrio: 'Todas', oSem: 'todas', vSeg: 'toca', vTodas: false, cSeg: 'fichas', year: HOYM().y, month: HOYM().m, cobFiltro: 'todos', punFiltro: 'todos', qT: '', qC: '', qV: '', qP: '' };
 const nomCli = (id) => { const c = AL.cliente(state, id); return c ? c.nombre : '(sin cliente)'; };
 const fincasEst = () => AL.fincasEstado(state, IX, hoy());
 
@@ -501,7 +501,7 @@ function renderAll() {
   else if (ui.tab === 'org') { head.innerHTML = headOrg(); view.innerHTML = viewOrg(); $('#fabLabel').textContent = 'Nueva tarea'; }
   else {
     head.innerHTML = headClientes(); view.innerHTML = viewClientes();
-    $('#fabLabel').textContent = ui.cSeg === 'fichas' ? 'Cliente' : 'Cliente en ' + ui.year;
+    $('#fabLabel').textContent = ui.cSeg === 'fichas' ? 'Cliente' : ui.cSeg === 'punt' ? 'Trabajo puntual' : 'Cliente en ' + ui.year;
   }
   wireView();
   renderStatus();
@@ -623,6 +623,10 @@ function headClientes() {
     const s = AL.statsCobros(state, ui.year, ui.month, H);
     return `<div class="kpis">${kpi('Cobrado ' + ui.year, eur0(s.cobradoAnio))}${kpi('Media al mes', eur0(s.media))}${kpi('Cobrado en ' + AL.MES[ui.month].toLowerCase(), eur0(s.cobradoMes))}${kpi('Pendiente anual', eur0(s.pendiente), s.pendiente ? 'warn' : '')}</div>`;
   }
+  if (ui.cSeg === 'punt') {
+    const s = AL.statsPuntuales(state, H.y, hoy());
+    return `<div class="kpis three">${kpi('Trabajos ' + H.y, s.n)}${kpi('Facturado ' + H.y, eur0(s.facturado))}${kpi('Pendiente', eur0(s.pendiente) + (s.nPend ? '<small> · ' + s.nPend + '</small>' : ''), s.pendiente ? 'warn' : '')}</div>`;
+  }
   const cs = AL.delAsesor(state).filter((c) => AL.activo(c, hoy()));
   const fe = fincasEst();
   return `<div class="kpis three">${kpi('Clientes', cs.length)}${kpi('Fincas', fe.length)}${kpi('Toca visitar', fe.filter((x) => x.e.toca).length, fe.some((x) => x.e.toca) ? 'warn' : '')}</div>`;
@@ -633,21 +637,37 @@ function selectorAnio() {
 }
 function viewClientes() {
   const ini = inicioVacio(); if (ini) return ini;
-  const seg = `<div class="seg">${[['fichas', 'Fichas'], ['planes', 'Planes'], ['cobros', 'Cobros']].map(([k, t]) => `<button data-cseg="${k}" aria-pressed="${ui.cSeg === k}">${t}</button>`).join('')}</div>`;
+  const seg = `<div class="seg">${[['fichas', 'Fichas'], ['planes', 'Planes'], ['cobros', 'Cobros'], ['punt', 'Puntuales']].map(([k, t]) => `<button data-cseg="${k}" aria-pressed="${ui.cSeg === k}">${t}</button>`).join('')}</div>`;
   if (ui.cSeg === 'fichas') {
     const q = N(ui.qC);
-    const L = AL.delAsesor(state).filter((c) => !q || N(c.nombre).includes(q));
+    const L = [...AL.delAsesor(state), ...AL.soloPuntuales(state)].filter((c) => !q || N(c.nombre).includes(q));
     const rows = L.map((c) => {
       const fs = AL.fincasDe(state, IX, c.id);
-      const toca = fs.filter((f) => AL.estadoFinca(state, f.id, hoy()).toca).length;
+      const punt = !c.ases;
+      const toca = punt ? 0 : fs.filter((f) => !AL.fincaPuntual(state, f.id) && AL.estadoFinca(state, f.id, hoy()).toca).length;
       const u = AL.recientes(state.visitas.filter((v) => v.cli === c.id))[0];
       const baja = !AL.activo(c, hoy());
-      return `<button class="row ${baja ? 'dim' : ''}" data-ficha="${esc(c.id)}"><div class="main"><div class="name">${esc(c.nombre)}${baja ? '<span class="tag">baja</span>' : ''}${c.mid ? '' : '<span class="tag" style="background:var(--warn-soft);color:var(--warn)">sin maestro</span>'}</div>
-        <div class="sub">${plural(fs.length, 'finca', 'fincas')} · ${u ? 'última visita ' + fF(u.fecha) : 'sin visitas'}</div></div>
+      const nP = state.puntuales.filter((p) => p.cli === c.id).length;
+      return `<button class="row ${baja ? 'dim' : ''}" data-ficha="${esc(c.id)}"><div class="main"><div class="name">${esc(c.nombre)}${punt ? '<span class="tag tag-punt">puntual</span>' : ''}${baja ? '<span class="tag">baja</span>' : ''}${c.mid ? '' : '<span class="tag" style="background:var(--warn-soft);color:var(--warn)">sin maestro</span>'}</div>
+        <div class="sub">${punt ? plural(nP, 'trabajo puntual', 'trabajos puntuales') : plural(fs.length, 'finca', 'fincas')} · ${u ? 'última visita ' + fF(u.fecha) : 'sin visitas'}</div></div>
         <div class="side">${toca && !baja ? `<div class="neg" style="font-weight:700">${toca}</div><div class="small">toca${toca === 1 ? '' : 'n'}</div>` : ''}</div></button>`;
     }).join('');
     return seg + `<div class="toolbar"><input class="grow" type="search" id="qC" placeholder="Buscar cliente" value="${esc(ui.qC)}"></div>` +
       (rows ? `<div class="list">${rows}</div>` : '<div class="empty">Ningún cliente coincide.</div>');
+  }
+  if (ui.cSeg === 'punt') {
+    const q = ui.qP.trim();
+    const T = AL.recientes(state.puntuales).filter((p) => (ui.punFiltro === 'todos' || !p.cobrado) && (!q || coincide(puntualTexto(p), q)));
+    let html = seg + `<div class="toolbar"><input class="grow" type="search" id="qP" placeholder="Buscar cliente, finca o trabajo" value="${esc(ui.qP)}" autocomplete="off"></div>
+      <div class="seg" style="max-width:260px">${[['todos', 'Todos'], ['pend', 'Sin cobrar']].map(([k, t]) => `<button data-punf="${k}" aria-pressed="${ui.punFiltro === k}">${t}</button>`).join('')}</div>`;
+    if (!T.length) return html + `<div class="empty">${state.puntuales.length ? (q ? 'Nada coincide con la búsqueda.' : 'Todo cobrado 🎉') : 'Todavía no hay trabajos puntuales. Apúntalos con el botón de abajo.'}</div>`;
+    let mes = '';
+    for (const p of T.slice(0, 200)) {
+      const m = (p.fecha || '').slice(0, 7);
+      if (m !== mes) { if (mes) html += '</div>'; mes = m; html += `<div class="day">${m ? esc(mesLargo(m)) : 'Sin fecha'}</div><div class="list">`; }
+      html += filaPuntual(p);
+    }
+    return html + '</div>';
   }
   if (ui.cSeg === 'planes') {
     const rows = AL.filasPlanes(state, ui.year, ui.month);
@@ -683,6 +703,8 @@ function wireView() {
   $$('[data-ficha]', v).forEach((b) => { b.onclick = () => abrirFicha(b.dataset.ficha); });
   $$('[data-cseg]', v).forEach((b) => { b.onclick = () => { ui.cSeg = b.dataset.cseg; renderAll(); }; });
   $$('[data-cobf]', v).forEach((b) => { b.onclick = () => { ui.cobFiltro = b.dataset.cobf; renderAll(); }; });
+  $$('[data-punf]', v).forEach((b) => { b.onclick = () => { ui.punFiltro = b.dataset.punf; renderAll(); }; });
+  wirePuntuales(v);
   $$('[data-mes]', v).forEach((b) => { b.onclick = () => { ui.month = +b.dataset.mes; renderAll(); }; });
   $$('[data-act="ajustes"]', v).forEach((b) => { b.onclick = abrirAjustes; });
   const pl = $('[data-act="plantillas"]', v); if (pl) pl.onclick = abrirPlantillas;
@@ -703,6 +725,7 @@ function wireView() {
   $$('[data-cob]', v).forEach((i) => { i.onchange = () => commit((c) => { c.años[ui.year][i.dataset.cob].cob[ui.month] = i.checked; }); });
   const qT = $('#qT', v); if (qT) qT.oninput = () => { ui.qT = qT.value; const p = qT.selectionStart; renderAll(); const n = $('#qT'); n.focus(); n.setSelectionRange(p, p); };
   const qV = $('#qV', v); if (qV) qV.oninput = () => { ui.qV = qV.value; const p = qV.selectionStart; renderAll(); const n = $('#qV'); n.focus(); n.setSelectionRange(p, p); };
+  const qP = $('#qP', v); if (qP) qP.oninput = () => { ui.qP = qP.value; const p = qP.selectionStart; renderAll(); const n = $('#qP'); n.focus(); n.setSelectionRange(p, p); };
   const qC = $('#qC', v); if (qC) qC.oninput = () => { ui.qC = qC.value; const p = qC.selectionStart; renderAll(); const n = $('#qC'); n.focus(); n.setSelectionRange(p, p); };
 }
 function marcarHecho(id) {
@@ -745,7 +768,7 @@ function headOrg() {
 function viewOrg() {
   const ini = inicioVacio(); if (ini) return ini;
   const h = hoy();
-  const clis = AL.delAsesor(state).filter((c) => state.tareas.some((t) => t.cli === c.id));
+  const clis = [...AL.delAsesor(state), ...AL.soloPuntuales(state)].filter((c) => state.tareas.some((t) => t.cli === c.id));
   if (ui.oCli !== 'todos' && !clis.some((c) => c.id === ui.oCli)) ui.oCli = 'todos';
   const base = state.tareas.filter((t) => (ui.oCli === 'todos' || t.cli === ui.oCli) && (ui.oTipo === 'Todos' || t.tipo === ui.oTipo));
   const enSem = (t) => { const g = AL.grupoSemana(t, h); return ui.oSem === 'todas' || (ui.oSem === 'venc' ? g === -1 : ui.oSem === 'mas' ? g >= 2 : String(g) === ui.oSem); };
@@ -785,7 +808,7 @@ function abrirTareaForm(orig, pre = {}) {
 function dibujarTareaForm(nueva) {
   const body = $('.sheet-body', sheetRoot); if (!body || !ftar) return;
   const f = ftar, h = hoy();
-  const clis = AL.delAsesor(state).filter((c) => AL.activo(c, h) || c.id === f.cli);
+  const clis = [...AL.delAsesor(state).filter((c) => AL.activo(c, h) || c.id === f.cli), ...AL.soloPuntuales(state)];
   const fincas = f.cli ? AL.fincasDe(state, IX, f.cli) : [];
   if (f.fin && !fincas.some((x) => x.id === f.fin)) { const fo = AL.finca(state, IX, f.fin); fincas.push({ id: f.fin, nombre: (fo && fo.nombre) || f.finNom || f.fin }); }
   const tipos = f.tipo === 'Seguimiento' ? ['Seguimiento'] : AL.TIPOS_TAREA.filter((t) => t !== 'Seguimiento');
@@ -865,22 +888,37 @@ function abrirFicha(id, nuevo = true) {
 }
 function fichaHTML(c) {
   const h = hoy(), fs = AL.fincasDe(state, IX, c.id);
-  const ests = fs.map((f) => ({ f, e: AL.estadoFinca(state, f.id, h) }));
-  const toca = ests.filter((x) => x.e.toca).length;
+  const ests = fs.map((f) => ({ f, e: AL.estadoFinca(state, f.id, h), p: !c.ases || AL.fincaPuntual(state, f.id) }));
+  const toca = ests.filter((x) => !x.p && x.e.toca).length;
+  const pun = AL.recientes(state.puntuales.filter((p) => p.cli === c.id));
   const vis = AL.recientes(state.visitas.filter((v) => v.cli === c.id));
   const tr = AL.recientes(state.trat.filter((t) => t.cli === c.id));
   const segs = AL.seguimientos(state, c.id);
   const y = HOYM().y, m = HOYM().m, r = (state.años[y] || {})[c.id];
-  let html = `<div class="fhead"><div class="kpis">${kpi('Última visita', vis[0] ? fF(vis[0].fecha) + '<small> · ' + esc(vis[0].finNom || '') + '</small>' : 'Ninguna')}${kpi('Fincas que tocan', toca + '<small> de ' + fs.length + '</small>', toca ? 'warn' : '')}</div></div>
+  let html = `<div class="fhead"><div class="kpis">${kpi('Última visita', vis[0] ? fF(vis[0].fecha) + '<small> · ' + esc(vis[0].finNom || '') + '</small>' : 'Ninguna')}${c.ases ? kpi('Fincas que tocan', toca + '<small> de ' + ests.filter((x) => !x.p).length + '</small>', toca ? 'warn' : '') : kpi('Trabajos puntuales', pun.length)}</div></div>
     <div class="actions two"><button class="btn primary" data-f="visita">Nueva visita</button><button class="btn" data-f="trat">Nuevo tratamiento</button></div>`;
   html += `<div class="sec"><h3>Fincas (${fs.length})</h3><button data-f="finca">+ Finca</button></div>`;
-  html += fs.length ? `<div class="list compact">${ests.map(({ f, e }) => `<button class="mini" data-ffin="${esc(f.id)}"><div><div class="name">${esc(f.nombre)}${f.nueva ? '<span class="tag" style="background:var(--warn-soft);color:var(--warn)">pendiente de alta</span>' : ''}</div><div class="sub">${esc((f.cultivos || []).join(', ') || 'Sin cultivos')}</div></div><div class="side ${e.toca ? 'alerta' : ''}">${esc(e.texto)}</div></button>`).join('')}</div>`
+  if (c.ases && fs.length) html += '<p class="small" style="margin:0 2px 8px">«Puntual»: finca que solo asesoras puntualmente; no sale en «Toca visitar».</p>';
+  html += fs.length ? `<div class="list compact">${ests.map(({ f, e, p }) => `<div class="mini"><button class="main" style="background:none;border:0;padding:0;text-align:left;flex:1;min-width:0;display:flex;justify-content:space-between;gap:10px;align-items:center" data-ffin="${esc(f.id)}"><div><div class="name">${esc(f.nombre)}${f.nueva ? '<span class="tag" style="background:var(--warn-soft);color:var(--warn)">pendiente de alta</span>' : ''}</div><div class="sub">${esc((f.cultivos || []).join(', ') || 'Sin cultivos')}</div></div><div class="side ${!p && e.toca ? 'alerta' : ''}">${esc(e.texto)}</div></button>${c.ases ? `<button class="paid${AL.fincaPuntual(state, f.id) ? ' punt' : ' off'}" data-fpunt="${esc(f.id)}" aria-pressed="${AL.fincaPuntual(state, f.id)}" title="Finca puntual: no sale en «Toca visitar»">Puntual</button>` : ''}</div>`).join('')}</div>`
     : `<p class="small">${c.mid ? 'Este cliente no tiene fincas en el maestro.' : 'Cliente sin enlazar con el maestro: sus fincas aparecerán al enlazarlo.'}</p>`;
   if (segs.length) html += `<div class="sec"><h3>Seguimientos (${segs.length})</h3></div><div class="list compact">${segs.map(filaSeg).join('')}</div>`;
   html += `<div class="sec"><h3>Visitas (${vis.length})</h3>${vis.length > 5 ? `<button data-f="vistodas">${fichaVerTodo.vis ? 'Ver menos' : 'Ver todas'}</button>` : ''}</div>`;
   html += vis.length ? `<div class="list compact">${(fichaVerTodo.vis ? vis : vis.slice(0, 5)).map((v) => filaVisita(v, false)).join('')}</div>` : '<p class="small">Sin visitas.</p>';
   html += `<div class="sec"><h3>Tratamientos (${tr.length})</h3>${tr.length > 5 ? `<button data-f="trattodos">${fichaVerTodo.trat ? 'Ver menos' : 'Ver todos'}</button>` : ''}</div>`;
   html += tr.length ? `<div class="list compact">${(fichaVerTodo.trat ? tr : tr.slice(0, 5)).map((t) => filaTrat(t, false)).join('')}</div>` : '<p class="small">Sin tratamientos.</p>';
+  html += `<div class="sec"><h3>Trabajos puntuales (${pun.length})</h3><button data-f="puntual">+ Trabajo</button></div>`;
+  if (pun.length) {
+    const pend = pun.filter((p) => !p.cobrado).reduce((a, p) => a + (Number(p.importe) || 0), 0);
+    html += `<p class="small" style="margin:0 2px 8px">Total ${eur(pun.reduce((a, p) => a + (Number(p.importe) || 0), 0))} · sin cobrar ${eur(pend)}</p><div class="list compact">${pun.map((p) => filaPuntual(p, false)).join('')}</div>`;
+  } else html += '<p class="small">Sin trabajos puntuales.</p>';
+  if (c.punt && !c.ases && !r) {
+    html += `<div class="sec"><h3>Cliente</h3></div>
+      <p class="small" style="margin:0 2px 8px">Cliente solo de trabajos puntuales: no tiene cuota y sus fincas no salen en «Toca visitar».</p>
+      <button class="switch" data-f="ases" role="switch" aria-checked="false">Asesoramiento mensual<i></i></button>
+      <div class="box"><div><span>Maestro de clientes</span><b>${c.mid ? esc(c.mid) : (state.mxPend.some((p) => p.tipo === 'cliente' && p.ref === c.id) ? 'Alta pedida' : 'Sin enlazar')}</b></div></div>
+      ${c.mid ? '' : '<div class="actions"><button class="btn" data-f="enlazar">Enlazar con el maestro</button></div>'}`;
+    return html;
+  }
   html += `<div class="sec"><h3>Planes y cobros ${y}</h3>${r ? '<button data-f="plancob">Editar</button>' : ''}</div>`;
   if (r) {
     let cob = 0, pend = 0;
@@ -905,14 +943,17 @@ function wireFicha(body, c) {
   on('trattodos', () => { fichaVerTodo.trat = !fichaVerTodo.trat; redrawSheet(); });
   on('plancob', () => abrirPlanCobro(c.id, HOYM().y));
   on('enlazar', () => abrirEnlazarCliente(c.id));
-  on('ases', () => { commit((s) => { const x = AL.cliente(s, c.id); x.ases = !x.ases; }); redrawSheet(); toast(AL.cliente(state, c.id).ases ? 'Se muestra en Asesor' : 'Oculto de las listas de Asesor (sus datos se conservan)'); });
+  on('ases', () => { commit((s) => { const x = AL.cliente(s, c.id); x.ases = !x.ases; if (x.ases) x.punt = false; }); redrawSheet(); toast(AL.cliente(state, c.id).ases ? 'Se muestra en Asesor' : 'Oculto de las listas de Asesor (sus datos se conservan)'); });
+  on('puntual', () => abrirPuntualForm(null, { cli: c.id }));
+  $$('[data-fpunt]', body).forEach((b) => { b.onclick = () => { const id = b.dataset.fpunt; commit((s) => { if (!s.finPunt) s.finPunt = {}; if (s.finPunt[id]) delete s.finPunt[id]; else s.finPunt[id] = true; }); redrawSheet(); toast(AL.fincaPuntual(state, id) ? 'Finca puntual: ya no sale en «Toca visitar»' : 'La finca vuelve a «Toca visitar»'); }; });
+  wirePuntuales(body);
   $$('[data-ffin]', body).forEach((b) => { b.onclick = () => abrirVisitaForm({ cli: c.id, fin: b.dataset.ffin }); });
   $$('[data-vis]', body).forEach((b) => { b.onclick = () => abrirVisita(b.dataset.vis); });
   $$('[data-hecho]', body).forEach((b) => { b.onclick = () => marcarHecho(b.dataset.hecho); });
   $$('[data-trat]', body).forEach((b) => { b.onclick = () => abrirTrat(b.dataset.trat); });
   const fa = $('#fAlta', body), fb = $('#fBaja', body);
-  fa.onchange = () => commit((s) => { AL.cliente(s, c.id).alta = fa.value || null; });
-  fb.onchange = () => commit((s) => { AL.cliente(s, c.id).baja = fb.value || null; });
+  if (fa) fa.onchange = () => commit((s) => { AL.cliente(s, c.id).alta = fa.value || null; });
+  if (fb) fb.onchange = () => commit((s) => { AL.cliente(s, c.id).baja = fb.value || null; });
 }
 
 /* Alta de una finca nueva para un cliente (entra en el maestro con Revisar = Sí) */
@@ -1019,8 +1060,10 @@ function opcionesCliente(sel) {
   const ases = AL.delAsesor(state).filter((c) => AL.activo(c, hoy()) || c.id === sel);
   const usados = new Set(state.clientes.map((c) => c.mid).filter(Boolean));
   const otros = IX ? [...IX.cli.values()].filter((m) => !usados.has(m.id) && !MX.deBaja(m) && MX.norm(m.tipo) !== 'proveedor').sort((a, b) => a.nombre.localeCompare(b.nombre, 'es')) : [];
-  const ocultos = state.clientes.filter((c) => !c.ases && c.id !== sel).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+  const ocultos = state.clientes.filter((c) => !c.ases && !c.punt && c.id !== sel).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+  const punt = AL.soloPuntuales(state);
   return `<option value="">Elige un cliente…</option><optgroup label="Clientes de Asesor">${ases.map((c) => opt(c.id, c.nombre, c.id === sel)).join('')}</optgroup>` +
+    (punt.length ? `<optgroup label="Clientes de trabajos puntuales">${punt.map((c) => opt(c.id, c.nombre, c.id === sel)).join('')}</optgroup>` : '') +
     (ocultos.length || otros.length ? `<optgroup label="Otros clientes del maestro">${ocultos.map((c) => opt(c.id, c.nombre, false)).join('')}${otros.map((m) => opt('mx:' + m.id, m.nombre, sel === 'mx:' + m.id)).join('')}</optgroup>` : '') +
     `<option value="__nuevo"${sel === '__nuevo' ? ' selected' : ''}>+ Cliente nuevo…</option>`;
 }
@@ -1030,7 +1073,7 @@ function resolverCliente(s, val, nombreNuevo) {
     const nombre = String(nombreNuevo || '').trim(); if (!nombre) throw new Error('Escribe el nombre del cliente nuevo');
     const m = IX ? MX.buscarCliente(IX, nombre) : null;
     let c = m ? s.clientes.find((x) => x.mid === m.id) : s.clientes.find((x) => N(x.nombre) === N(nombre));
-    if (c) { c.ases = true; return c.id; }
+    if (c) { if (!c.punt) c.ases = true; return c.id; }
     c = { id: uid('c'), mid: m ? m.id : null, nombre: m ? m.nombre : nombre, ases: true, alta: hoy().slice(0, 7), baja: null };
     s.clientes.push(c);
     if (!m) pedirAlta(s, 'cliente', c.id, { nombre, tipo: 'Cliente', servicios: ['Asesoría'] });
@@ -1040,10 +1083,123 @@ function resolverCliente(s, val, nombreNuevo) {
     const mid = val.slice(3), m = IX && IX.cli.get(mid);
     let c = s.clientes.find((x) => x.mid === mid);
     if (!c) { c = { id: uid('c'), mid, nombre: m ? m.nombre : mid, ases: true, alta: hoy().slice(0, 7), baja: null }; s.clientes.push(c); }
-    c.ases = true; return c.id;
+    if (!c.punt) c.ases = true; return c.id;
   }
   const c = AL.cliente(s, val); if (!c) throw new Error('Elige el cliente');
-  c.ases = true; return c.id;
+  if (!c.punt) c.ases = true; return c.id;
+}
+
+/* ---------- Trabajos puntuales (1.5.0) ----------
+   Trabajos sueltos con precio cerrado (visita e informe, tratamientos, analíticas…), aparte de la cuota mensual.
+   Cuentan como asesoría: en Cobros de la hoja salen en el mes del trabajo, pendientes hasta marcarlos cobrados. */
+const puntualTexto = (p) => [nomCli(p.cli), p.finNom, p.tipo, p.texto].join(' ');
+function filaPuntual(p, conCliente = true) {
+  const tit = conCliente ? nomCli(p.cli) + (p.finNom ? ' · ' + p.finNom : '') : (p.finNom || p.tipo || 'Trabajo');
+  const sub = [AL.ICONO_PUNTUAL[p.tipo] ? AL.ICONO_PUNTUAL[p.tipo] + ' ' + p.tipo : p.tipo, p.texto, fF(p.fecha)].filter(Boolean).join(' · ');
+  return `<div class="prow"><button class="who" data-pun="${esc(p.id)}"><strong>${esc(tit)}</strong><small>${esc(sub)}</small></button>
+    <span class="pimp">${esc(eur(Number(p.importe) || 0))}</span>
+    <label class="sw"><input type="checkbox" data-pcob="${esc(p.id)}" ${p.cobrado ? 'checked' : ''} aria-label="Cobrado"><i></i></label></div>`;
+}
+function wirePuntuales(root) {
+  $$('[data-pun]', root).forEach((b) => { b.onclick = () => { const p = state.puntuales.find((x) => x.id === b.dataset.pun); if (p) abrirPuntualForm(p); }; });
+  $$('[data-pcob]', root).forEach((i) => { i.onchange = () => { commit((s) => { const p = s.puntuales.find((x) => x.id === i.dataset.pcob); if (p) { p.cobrado = i.checked; p.fCobro = i.checked ? hoy() : ''; } }); redrawSheet(); toast(i.checked ? 'Cobrado' : 'Sin cobrar'); }; });
+}
+let fpu = null;
+function abrirPuntualForm(orig, pre = {}) {
+  fpu = orig
+    ? { id: orig.id, fecha: orig.fecha || hoy(), cliSel: orig.cli || '', cliNuevo: '', finSel: orig.fin || (orig.finNom ? '__texto' : ''), finTexto: orig.fin ? '' : (orig.finNom || ''), tipo: orig.tipo || 'Otro', texto: orig.texto || '', imp: nf(Number(orig.importe) || 0, 0, 2), cobrado: !!orig.cobrado, fCobro: orig.fCobro || '' }
+    : { id: null, fecha: hoy(), cliSel: pre.cli || '', cliNuevo: '', finSel: pre.fin || '', finTexto: '', tipo: pre.tipo || AL.TIPOS_PUNTUAL[0], texto: '', imp: '', cobrado: false, fCobro: '' };
+  openSheet(orig ? 'Trabajo puntual' : 'Nuevo trabajo puntual', '', dibujarPuntualForm);
+  dibujarPuntualForm();
+}
+/* Clientes para un trabajo puntual: los de Asesor, los puntuales, el resto del maestro y uno nuevo */
+function opcionesClientePuntual(sel) {
+  const ases = AL.delAsesor(state).filter((c) => AL.activo(c, hoy()) || c.id === sel);
+  const punt = AL.soloPuntuales(state);
+  const usados = new Set(state.clientes.map((c) => c.mid).filter(Boolean));
+  const ocultos = state.clientes.filter((c) => !c.ases && !c.punt).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+  const otros = IX ? [...IX.cli.values()].filter((m) => !usados.has(m.id) && !MX.deBaja(m) && MX.norm(m.tipo) !== 'proveedor').sort((a, b) => a.nombre.localeCompare(b.nombre, 'es')) : [];
+  return `<option value="">Elige un cliente…</option><optgroup label="Clientes de Asesor">${ases.map((c) => opt(c.id, c.nombre, c.id === sel)).join('')}</optgroup>` +
+    (punt.length ? `<optgroup label="Clientes de trabajos puntuales">${punt.map((c) => opt(c.id, c.nombre, c.id === sel)).join('')}</optgroup>` : '') +
+    (ocultos.length || otros.length ? `<optgroup label="Otros clientes del maestro">${ocultos.map((c) => opt(c.id, c.nombre, c.id === sel)).join('')}${otros.map((m) => opt('mx:' + m.id, m.nombre, sel === 'mx:' + m.id)).join('')}</optgroup>` : '') +
+    `<option value="__nuevo"${sel === '__nuevo' ? ' selected' : ''}>+ Cliente nuevo…</option>`;
+}
+function fincasParaPuntual(val) {
+  if (!val || val === '__nuevo') return [];
+  if (val.startsWith('mx:')) {
+    const mid = val.slice(3);
+    return IX ? [...IX.fin.values()].filter((f) => f.clienteId === mid).map((f) => ({ id: f.id, nombre: f.nombre })).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es')) : [];
+  }
+  return AL.fincasDe(state, IX, val);
+}
+/* Convierte la elección en un cliente de Asesor (dentro de commit). Un cliente que no estaba entra como «solo puntual»:
+   sin cuota y sin «Toca visitar». Uno que ya estaba no cambia. */
+function resolverClientePuntual(s, val, nombreNuevo) {
+  const crear = (m, nombre) => {
+    const idFijo = m ? 'cm-' + m.id : null;
+    const c = { id: idFijo && !AL.cliente(s, idFijo) ? idFijo : uid('c'), mid: m ? m.id : null, nombre: m ? m.nombre : nombre, ases: false, punt: true, alta: null, baja: null };
+    s.clientes.push(c);
+    if (!m) pedirAlta(s, 'cliente', c.id, { nombre, tipo: 'Cliente', servicios: ['Asesoría puntual'] });
+    return c.id;
+  };
+  if (val === '__nuevo') {
+    const nombre = String(nombreNuevo || '').trim(); if (!nombre) throw new Error('Escribe el nombre del cliente nuevo');
+    const m = IX ? MX.buscarCliente(IX, nombre) : null;
+    const c = m ? s.clientes.find((x) => x.mid === m.id) : s.clientes.find((x) => N(x.nombre) === N(nombre));
+    return c ? c.id : crear(m, nombre);
+  }
+  if (val.startsWith('mx:')) {
+    const mid = val.slice(3), m = IX && IX.cli.get(mid);
+    const c = s.clientes.find((x) => x.mid === mid);
+    return c ? c.id : crear(m || { id: mid, nombre: mid }, '');
+  }
+  const c = AL.cliente(s, val); if (!c) throw new Error('Elige el cliente');
+  return c.id;
+}
+function dibujarPuntualForm() {
+  const body = $('.sheet-body', sheetRoot); if (!body || !fpu) return;
+  const f = fpu, nueva = !f.id;
+  const fincas = fincasParaPuntual(f.cliSel);
+  if (f.finSel && f.finSel !== '__texto' && !fincas.some((x) => x.id === f.finSel)) { const fo = AL.finca(state, IX, f.finSel); fincas.push({ id: f.finSel, nombre: (fo && fo.nombre) || f.finSel }); }
+  body.innerHTML = `
+    <label class="fld"><span>Fecha del trabajo</span><input type="date" id="puF" value="${esc(f.fecha)}"></label>
+    <label class="fld"><span>Cliente</span><select id="puC">${opcionesClientePuntual(f.cliSel)}</select></label>
+    ${f.cliSel === '__nuevo' ? `<label class="fld"><span>Nombre del cliente nuevo</span><input type="text" id="puCN" autocomplete="off" value="${esc(f.cliNuevo)}"></label><p class="hint">Entra como cliente solo de trabajos puntuales (sin cuota) y se da de alta en el maestro.</p>` : ''}
+    <label class="fld"><span>Finca (opcional)</span><select id="puFi" ${f.cliSel ? '' : 'disabled'}><option value="">${f.cliSel ? 'Sin finca concreta' : 'Primero elige el cliente'}</option>${fincas.map((x) => opt(x.id, x.nombre, x.id === f.finSel)).join('')}<option value="__texto"${f.finSel === '__texto' ? ' selected' : ''}>Otra (escribir el nombre)…</option></select></label>
+    ${f.finSel === '__texto' ? `<label class="fld"><span>Nombre de la finca</span><input type="text" id="puFT" autocomplete="off" value="${esc(f.finTexto)}"></label>` : ''}
+    <div class="fld"><span>Tipo de trabajo</span><div class="chips wrap" id="puT">${AL.TIPOS_PUNTUAL.map((t) => `<button type="button" class="chip" data-v="${esc(t)}" aria-pressed="${f.tipo === t}">${AL.ICONO_PUNTUAL[t]} ${esc(t)}</button>`).join('')}</div></div>
+    <label class="fld"><span>Descripción</span><input type="text" id="puD" autocomplete="off" value="${esc(f.texto)}" placeholder="Ej. Informe de nutrición del almendro"></label>
+    <label class="fld"><span>Importe (€ sin IVA)</span><input type="text" id="puI" inputmode="decimal" autocomplete="off" value="${esc(f.imp)}" placeholder="0,00"></label>
+    <button class="switch" id="puCo" role="switch" aria-checked="${f.cobrado}">Cobrado<i></i></button>
+    ${f.cobrado ? `<label class="fld"><span>Fecha de cobro</span><input type="date" id="puFC" value="${esc(f.fCobro || hoy())}"></label>` : ''}
+    <div class="actions${nueva ? '' : ' two'}">${nueva ? '' : '<button class="btn danger" id="puB">Borrar</button>'}<button class="btn primary" id="puG">Guardar</button></div>`;
+  const val = (id, k) => { const el = $(id, body); if (el) el.oninput = el.onchange = () => { fpu[k] = el.value; }; };
+  val('#puF', 'fecha'); val('#puCN', 'cliNuevo'); val('#puFT', 'finTexto'); val('#puD', 'texto'); val('#puI', 'imp'); val('#puFC', 'fCobro');
+  $('#puC', body).onchange = (e) => { fpu.cliSel = e.target.value; fpu.finSel = ''; redrawSheet(); };
+  $('#puFi', body).onchange = (e) => { fpu.finSel = e.target.value; redrawSheet(); };
+  $('#puT', body).onclick = (e) => { const b = e.target.closest('[data-v]'); if (!b) return; fpu.tipo = b.dataset.v; redrawSheet(); };
+  $('#puCo', body).onclick = () => { fpu.cobrado = !fpu.cobrado; if (fpu.cobrado && !fpu.fCobro) fpu.fCobro = hoy(); redrawSheet(); };
+  $('#puG', body).onclick = () => { if (guardarPuntual()) { closeSheet(); toast(nueva ? 'Trabajo puntual apuntado' : 'Trabajo actualizado'); refreshMx({}); } };
+  if (!nueva) armDelete($('#puB', body), () => { if (commit((s) => { s.puntuales = s.puntuales.filter((x) => x.id !== fpu.id); })) { closeSheet(); toast('Trabajo borrado'); } });
+}
+function guardarPuntual() {
+  const f = fpu;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(f.fecha || '')) { toast('Pon la fecha del trabajo', true); return false; }
+  if (!f.cliSel) { toast('Elige el cliente', true); return false; }
+  if (f.cliSel === '__nuevo' && !f.cliNuevo.trim()) { toast('Escribe el nombre del cliente nuevo', true); return false; }
+  const imp = parseNum(f.imp);
+  if (!isFinite(imp) || imp <= 0) { toast('Escribe el importe del trabajo', true); return false; }
+  if (f.finSel === '__texto' && !f.finTexto.trim()) { toast('Escribe el nombre de la finca o elige «Sin finca concreta»', true); return false; }
+  if (f.tipo === 'Otro' && !f.texto.trim()) { toast('Escribe en qué consiste el trabajo', true); return false; }
+  return commit((s) => {
+    const cli = resolverClientePuntual(s, f.cliSel, f.cliNuevo);
+    let fin = null, finNom = '';
+    if (f.finSel === '__texto') finNom = f.finTexto.trim();
+    else if (f.finSel) { const fo = AL.finca(s, IX, f.finSel); fin = f.finSel; finNom = fo ? fo.nombre : ((fincasParaPuntual(f.cliSel).find((x) => x.id === f.finSel) || {}).nombre || ''); }
+    const datos = { fecha: f.fecha, cli, fin, finNom, tipo: f.tipo, texto: f.texto.trim(), importe: Math.round(imp * 100) / 100, cobrado: !!f.cobrado, fCobro: f.cobrado ? (f.fCobro || hoy()) : '' };
+    if (!f.id) s.puntuales.push({ id: uid('pu'), ...datos, ts: Date.now() });
+    else { const p = s.puntuales.find((x) => x.id === f.id); if (!p) throw new Error('El trabajo ya no existe'); Object.assign(p, datos); }
+  });
 }
 
 /* ---------- Formulario de visita ---------- */
@@ -1871,6 +2027,7 @@ async function init() {
     else if (ui.tab === 'trat') abrirTratForm();
     else if (ui.tab === 'org') abrirTareaForm(null, { cli: ui.oCli !== 'todos' ? ui.oCli : '', tipo: ui.oTipo !== 'Todos' && ui.oTipo !== 'Seguimiento' ? ui.oTipo : 'Visita' });
     else if (ui.cSeg === 'fichas') abrirNuevoCliente();
+    else if (ui.cSeg === 'punt') abrirPuntualForm();
     else abrirAnadirAnio();
   };
   renderAll();

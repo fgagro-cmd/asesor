@@ -5,7 +5,7 @@ App para el móvil, la tablet y el ordenador que une **Visitas**, el **Generador
 - **Visitas**: fincas que toca visitar, seguimientos pendientes, nueva visita con plagas por nivel, estado fenológico, acción pendiente y fotos.
 - **Tratamientos**: recomendación con orden de mezcla, plantillas, imagen para WhatsApp, historial y Excel.
 - **Organización** (desde la 1.4.0): tareas de clientes por semana (visitas, seguimientos, tratamientos, planes y otras), con prioridad, filtros y calendario «Asesor» de Google.
-- **Clientes**: ficha de cada cliente (última visita, fincas que tocan, visitas, tratamientos, planes y cobros), planes de abonado enviados por mes y cobros.
+- **Clientes**: ficha de cada cliente (última visita, fincas que tocan, visitas, tratamientos, trabajos puntuales, planes y cobros), planes de abonado enviados por mes, cobros y **trabajos puntuales** (desde la 1.5.0).
 
 Clientes, fincas y cultivos salen de los **maestros** (Drive › Apps › Maestros). Cada aparato guarda sus datos y funciona sin conexión. Desde la **1.2.0** la hoja **«Asesor»** (Drive › Apps › Asesor) es la copia común de todos tus aparatos: cada cambio se envía solo, cada 3 minutos (y al abrir la app) se recogen los cambios de los otros aparatos, y si un mismo dato se cambia en dos sitios se queda el cambio más reciente. Los borrados también pasan de un aparato a otro. Las fotos se suben a la carpeta «Fotos de visitas» junto a esa hoja.
 
@@ -91,3 +91,17 @@ Para activarlo (una vez, en el script de la hoja «Asesor»):
 4. En la app: ⚙ → Tus aparatos → «Juntar ahora». Debe poner «📅 Calendario «Asesor» al día».
 
 Desde este script, los aparatos con Asesor anterior a la 1.4.0 no pueden subir la copia (no conocen las tareas): basta con cerrarlos y abrirlos con conexión para que se actualicen.
+
+
+## Trabajos puntuales (1.5.0)
+Trabajos sueltos con precio cerrado, aparte de la cuota mensual: Clientes › **Puntuales** (y en la ficha de cada cliente, «+ Trabajo»).
+
+- **Datos**: fecha, cliente, finca (opcional; de la lista o escrita), tipo (📋 Visita e informe · 🧪 Tratamientos · 🔬 Analíticas · 📝 Otro), descripción, importe sin IVA y cobrado (con fecha de cobro).
+- **Clientes**: los de Asesor, los del maestro o uno nuevo. Un cliente que no estaba en Asesor entra como **solo puntual**: sin cuota, sus fincas no salen en «Toca visitar» y no va a la pestaña Clientes de la hoja. Uno nuevo se da de alta en el maestro con el servicio «Asesoría puntual» (ese servicio no lo hace entrar como cliente de asesoramiento mensual). En su ficha, «Asesoramiento mensual» lo pasa a cliente normal.
+- **Finca puntual**: en la ficha de un cliente con cuota, el botón «Puntual» de cada finca la quita de «Toca visitar» (y de «Fincas por visitar» de la Vista única).
+- **Cobros**: cuentan como asesoría en el mes del trabajo y quedan pendientes hasta marcarlos cobrados. En la hoja, una fila más en **Cobros** (columna «Concepto»: «Cuota» o «Puntual · tipo · finca · descripción») y la pestaña nueva **Trabajos puntuales**. La pestaña Clientes añade «Fincas puntuales (ID)» y «Fincas puntuales». Finanzas (1.3.2) suma los puntuales sin cobrar en «Asesoramiento».
+- **Varios aparatos**: los trabajos y las fincas puntuales viajan entre aparatos como el resto. El script de la hoja (versión mínima 1.5.0) no deja subir a los aparatos que sigan en la 1.4.
+
+### Paso a la 1.5.0
+1. Pega el `google-sheets/Codigo.gs` nuevo en el Apps Script de la hoja «Asesor» (conservando tu línea `const CLAVE = '…'`) → Guardar → **Implementar → Gestionar implementaciones** → lápiz ✏ → **Nueva versión** → Implementar.
+2. Abre Asesor con conexión en cada aparato (primero el móvil) hasta ver «Asesor 1.5.0» al final de ⚙ Ajustes.
